@@ -1,0 +1,145 @@
+/* ============================================================
+   satu-album · undangan — DASHBOARD STYLE
+   Halaman Dashboard / Menu Utama (index.html)
+   Layout Grid + Card + Modal.
+   ============================================================ */
+
+.dashboard {
+  min-height: 100vh;
+  background:
+    radial-gradient(1200px 600px at 85% -10%, var(--peach), transparent 60%),
+    radial-gradient(1000px 500px at -10% 10%, var(--lavender), transparent 55%),
+    var(--bg);
+}
+
+/* ---------- Hero / Header dashboard ---------- */
+.dash-hero {
+  text-align: center;
+  padding: 4rem 1.25rem 1.75rem;
+}
+.dash-hero .logo {
+  display: inline-flex; align-items: center; gap: 0.6rem;
+  font-weight: 800; font-size: 1.5rem; color: var(--ink);
+  text-decoration: none; margin-bottom: 0.6rem;
+}
+.dash-hero .logo i { color: var(--gold); font-size: 1.4rem; }
+.dash-hero h1 { font-size: clamp(1.8rem, 4vw, 2.6rem); letter-spacing: 0.02em; }
+.dash-hero p.sub { color: var(--muted); max-width: 520px; margin: 0.5rem auto 0; font-size: 1.02rem; }
+.dash-hero .divider {
+  width: 92px; height: 3px; margin: 1.1rem auto 0;
+  background: linear-gradient(90deg, transparent, var(--gold), transparent);
+  border-radius: 999px;
+}
+
+/* ---------- Grid menu ---------- */
+.menu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1.1rem;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 4rem;
+}
+
+.dash-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  background: var(--card-bg);
+  border: 1px solid var(--line);
+  border-top: 5px solid var(--accent, var(--line));
+  border-radius: var(--radius);
+  padding: 1.4rem 1.3rem;
+  cursor: pointer;
+  text-align: left;
+  box-shadow: var(--shadow);
+  transition: transform 0.18s ease, box-shadow 0.2s ease;
+  overflow: hidden;
+}
+.dash-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-hover); }
+
+/* blob aksen halus di pojok card */
+.dash-card::after {
+  content: "";
+  position: absolute; right: -30px; top: -30px;
+  width: 90px; height: 90px; border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.12;
+}
+
+.dash-card .card-icon {
+  width: 52px; height: 52px; border-radius: 14px;
+  display: grid; place-items: center;
+  background: var(--accent);
+  color: #fff; font-size: 1.35rem;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.12);
+}
+.dash-card h3 { font-size: 1.05rem; font-weight: 800; letter-spacing: 0.01em; }
+.dash-card p { color: var(--muted); font-size: 0.9rem; flex: 1; }
+.dash-card .card-go {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  font-weight: 700; font-size: 0.88rem; color: var(--ink);
+}
+.dash-card .card-go i { transition: transform 0.15s ease; }
+.dash-card:hover .card-go i { transform: translateX(4px); }
+
+/* Warna aksen per menu */
+.dash-card[data-accent="rose"]    { --accent: var(--rose);    --accent-dark: #c98f8f; }
+.dash-card[data-accent="sage"]    { --accent: var(--sage);    --accent-dark: #82997b; }
+.dash-card[data-accent="lavender"]{ --accent: var(--lavender);--accent-dark: #a18fc0; }
+.dash-card[data-accent="gold"]    { --accent: var(--gold);    --accent-dark: #b98d4f; }
+.dash-card[data-accent="sky"]     { --accent: var(--sky);     --accent-dark: #6f9dbb; }
+.dash-card[data-accent="peach"]   { --accent: var(--peach);   --accent-dark: #c98f74; }
+.dash-card[data-accent="sand"]    { --accent: var(--sand);    --accent-dark: #b3985b; }
+.dash-card[data-accent="graphite"]{ --accent: #7c7b76;        --accent-dark: var(--graphite); }
+.dash-card .card-icon { background: var(--accent-dark); }
+
+/* ---------- Modal ---------- */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(40, 35, 30, 0.45);
+  backdrop-filter: blur(4px);
+  display: none; align-items: center; justify-content: center;
+  padding: 1.25rem;
+}
+.modal-overlay.show { display: flex; animation: fadeIn 0.2s ease; }
+
+.modal {
+  width: 100%; max-width: 420px; max-height: 88vh; overflow: auto;
+  background: var(--card-bg);
+  border-radius: 22px;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.25);
+  padding: 1.75rem 1.5rem;
+  animation: slideUp 0.28s cubic-bezier(.2, .8, .2, 1);
+}
+.modal-head { display: flex; align-items: flex-start; gap: 0.9rem; margin-bottom: 0.6rem; }
+.modal-head .m-icon {
+  width: 46px; height: 46px; border-radius: 12px; flex: 0 0 auto;
+  display: grid; place-items: center; color: #fff; font-size: 1.15rem;
+  background: var(--m-accent);
+}
+.modal-head h3 { font-size: 1.15rem; font-weight: 800; }
+.modal-head .m-close { margin-left: auto; border: 0; background: none; font-size: 1.2rem; color: var(--muted); cursor: pointer; line-height: 1; }
+.modal-body { color: var(--muted); font-size: 0.94rem; margin-bottom: 1.1rem; }
+.modal-body p + p { margin-top: 0.5rem; }
+.modal-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+.modal-actions .btn { flex: 1 1 auto; }
+
+/* ---------- Footer dashboard ---------- */
+.dash-footer {
+  text-align: center; color: var(--muted);
+  padding: 1.5rem 1.25rem 2.5rem; font-size: 0.85rem;
+}
+
+/* ---------- Animasi ---------- */
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 560px) {
+  .menu-grid { grid-template-columns: 1fr; padding: 0.5rem 1rem 3rem; }
+  .dash-card { flex-direction: row; align-items: center; }
+  .dash-card p { display: none; }
+  .dash-card .card-go { margin-left: auto; }
+}

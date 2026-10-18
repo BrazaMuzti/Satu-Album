@@ -1,4 +1,4 @@
-# satu-album
+# Satu-Album
 
 Kamera sekali pakai digital. Buat sebuah album, bagikan link-nya, dan biarkan tamu memotret melalui browser dengan warna film analog (color grading di canvas). Hasil foto terkumpul di galeri bersama.
 
@@ -12,7 +12,7 @@ Kamera sekali pakai digital. Buat sebuah album, bagikan link-nya, dan biarkan ta
 ## Arsitektur
 
 ```
-satualbum/
+Satu-Album/
 ├── server/   # Express API (Node ESM)
 │   ├── index.js   # routes + app
 │   ├── store.js   # penyimpanan event & foto (JSON on disk)
