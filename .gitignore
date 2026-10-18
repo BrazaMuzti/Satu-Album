@@ -1,0 +1,12 @@
+node_modules/
+.env
+server/uploads/
+server/data/
+server/credentials/
+client/dist/
+*.log
+*.tsbuildinfo
+
+
+client/node_modules
+client/dist
