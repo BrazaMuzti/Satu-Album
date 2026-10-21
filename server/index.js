@@ -7,20 +7,39 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import * as store from "./store.js";
-import { isDriveReady, uploadPhotoToDrive } from "./drive.js";
+import { driveInfo, isDriveReady, uploadPhotoToDrive } from "./drive.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const LOCAL_DIR = path.join(__dirname, process.env.LOCAL_UPLOAD_DIR || "uploads");
+const HOST = process.env.HOST || "0.0.0.0";
+/* URL publik API (ex: https://satu-album-api.onrender.com). Digunakan untuk membuat
+   URL foto lokal menjadi absolut supaya SPA di domain lain bisa display. */
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+/* Allowlist CORS (domain client, ex: https://satu-album.vercel.app).
+   Vazio = allow all (dev local). */
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || "").split(",").map(s => s.trim()).filter(Boolean);
+const uploadDirEnv = process.env.UPLOAD_DIR || process.env.LOCAL_UPLOAD_DIR || "uploads";
+const LOCAL_DIR = path.isAbsolute(uploadDirEnv) ? uploadDirEnv : path.join(__dirname, uploadDirEnv);
 fs.mkdirSync(LOCAL_DIR, { recursive: true });
-app.use(cors());
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin || ALLOWED_ORIGINS.length === 0) return cb(null, true);
+    cb(null, ALLOWED_ORIGINS.includes(origin));
+  }
+}));
 app.use(express.json());
 app.use("/uploads", express.static(LOCAL_DIR));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
-function slugify(t) { return (t || "").toLowerCase().trim().split(" ").filter(Boolean).join("-") || nanoid(8); }
+function slugify(t) {
+  const base = (t || "").toLowerCase().trim();
+  return base.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || nanoid(8);
+}
 
-app.get("/api/health", (req, res) => res.json({ ok: true, drive: isDriveReady() }));
+app.get("/api/health", (req, res) => {
+  const info = driveInfo();
+  res.json({ ok: true, drive: isDriveReady(), driveMode: info.mode, driveRootFolderId: info.rootFolderId });
+});
 
 app.post("/api/events", (req, res) => {
   const b = req.body || {};
@@ -46,11 +65,12 @@ app.post("/api/events/:slug/photos", upload.single("photo"), async (req, res) =>
     const drive = await uploadPhotoToDrive(req.file.buffer, req.file.mimetype, event);
     let photo;
     if (drive) {
-      photo = { id: nanoid(10), eventSlug: event.slug, url: drive.webContentLink, thumb: drive.thumbnail, source: "drive", createdAt: new Date().toISOString() };
+      photo = { id: nanoid(10), eventSlug: event.slug, url: drive.url, thumb: drive.thumb, source: "drive", createdAt: new Date().toISOString() };
     } else {
       const name = "photo-" + Date.now() + "-" + Math.floor(Math.random() * 1e6) + ".jpg";
       fs.writeFileSync(path.join(LOCAL_DIR, name), req.file.buffer);
-      photo = { id: nanoid(10), eventSlug: event.slug, url: "/uploads/" + name, thumb: "/uploads/" + name, source: "local", createdAt: new Date().toISOString() };
+      const abs = PUBLIC_BASE_URL + "/uploads/" + name;
+      photo = { id: nanoid(10), eventSlug: event.slug, url: abs, thumb: abs, source: "local", createdAt: new Date().toISOString() };
     }
     store.addPhoto(photo);
     const events = store.getEvents();
@@ -66,4 +86,8 @@ app.get("/api/events/:slug/photos", (req, res) => {
   res.json({ photos: store.getPhotos(req.params.slug) });
 });
 
-app.listen(PORT, () => console.log("satualbum api on http://localhost:" + PORT));
+app.listen(PORT, HOST, () => {
+  const info = driveInfo();
+  console.log("satualbum api on http://" + HOST + ":" + PORT);
+  console.log("drive: " + (info.ready ? "aktif via " + info.mode : "nonaktif, foto disimpan lokal"));
+});

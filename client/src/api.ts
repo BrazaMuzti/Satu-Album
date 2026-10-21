@@ -23,17 +23,21 @@ async function json<T>(r: Response): Promise<T> {
   }
   return r.json();
 }
+/* Basis URL API. Di dev via proxy Vite (vite.config.ts) — kena supersede
+   VITE_API_BASE saat build production (ex: https://satu-album-api.onrender.com). */
+const API_BASE: string = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+const api = (p: string) => API_BASE + p;
 export async function createEvent(data: { name: string; type: string; preset: string; revealAt: string | null }): Promise<{ event: EventType }> {
-  return json(await fetch("/api/events", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(data) }));
+  return json(await fetch(api("/api/events"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(data) }));
 }
 export async function getEvent(slug: string): Promise<{ event: EventType }> {
-  return json(await fetch("/api/events/" + slug));
+  return json(await fetch(api("/api/events/" + slug)));
 }
 export async function getPhotos(slug: string): Promise<{ photos: Photo[] }> {
-  return json(await fetch("/api/events/" + slug + "/photos"));
+  return json(await fetch(api("/api/events/" + slug + "/photos")));
 }
 export async function uploadPhoto(slug: string, blob: Blob): Promise<{ photo: Photo }> {
   const fd = new FormData();
   fd.append("photo", blob, "photo.jpg");
-  return json(await fetch("/api/events/" + slug + "/photos", { method: "POST", body: fd }));
+  return json(await fetch(api("/api/events/" + slug + "/photos"), { method: "POST", body: fd }));
 }

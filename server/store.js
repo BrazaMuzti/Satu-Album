@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "data");
+const dataDirEnv = process.env.DATA_DIR || "data";
+const DATA_DIR = path.isAbsolute(dataDirEnv) ? dataDirEnv : path.join(__dirname, dataDirEnv);
 const EVENTS_FILE = path.join(DATA_DIR, "events.json");
 const PHOTOS_FILE = path.join(DATA_DIR, "photos.json");
 

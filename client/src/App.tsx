@@ -23,9 +23,13 @@ function Home() {
   );
 }
 
+/* BASE_URL = "/" (dev local / Vercel) atau "/Satu-Album/" (GitHub Pages project site).
+   Router memakai base yang sama agar route seperti /events/<slug> tetap cocok. */
+const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, "") || "/";
+
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={BASENAME}>
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/create" element={<Create />} />

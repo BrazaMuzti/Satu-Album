@@ -1,0 +1,30 @@
+# Blueprint Render untuk deploy API Satu-Album.
+# Uso: Repository -> New -> Blueprint (render.yaml), lalu konfigurasi env vars.
+services:
+  - type: web
+    name: satu-album-api
+    runtime: node
+    rootDir: server
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: PORT
+        value: 3001
+      - key: ALLOWED_ORIGIN
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      # OAuth2 akun Google pribadi (lihat DEPLOYMENT.md bagian 4).
+      # Ambil refresh token lokal dengan: cd server && npm run token
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_DRIVE_ROOT_FOLDER_NAME
+        value: Satu-Album

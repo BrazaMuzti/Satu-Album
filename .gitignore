@@ -7,6 +7,9 @@ client/dist/
 *.log
 *.tsbuildinfo
 
+# Arsip lokal (30 MB) — jangan ikut masuk repo.
+Arsip.tar.gz
+Arsip/
 
 client/node_modules
 client/dist
