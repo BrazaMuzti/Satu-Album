@@ -6,7 +6,7 @@
 
 | Aspek | Aturan |
 | --- | --- |
-| Base | `/api/v1/*` (versi baru). Endpoint lama `/api/health`, `/api/events*` dipertahankan **tanpa perubahan** agar klien kamera tetap jalan |
+| Base | `/api/v1/*` (versi baru). Endpoint lama `/api/health`, `/api/events*` tetap ada, tetapi **kontraknya sudah berubah** pada refactor Drive-as-truth: unggah foto kini **biner mentah** (bukan `multipart`), dan acara/kunci tamu memakai otorisasi (lihat §2) |
 | Sukses | `{ "ok": true, "data": ..., "meta": {...} }` |
 | Error | `{ "ok": false, "error": { "code": "FORBIDDEN", "message": "...", "details": [...] } }` |
 | Kode error | `BAD_REQUEST`(400), `UNAUTHORIZED`(401), `FORBIDDEN`(403), `NOT_FOUND`(404), `CONFLICT`(409), `UNPROCESSABLE`(422), `RATE_LIMITED`(429), `INTERNAL`(500) |
@@ -22,11 +22,20 @@
 
 | Method · Path | Akses | Fungsi |
 | --- | --- | --- |
-| `GET /api/health` | publik | `{ ok, db:{ready,migrations}, drive:{configured}, themes:{count} }` (menambah field, tidak menghapus yang lama) |
-| `POST /api/events` | publik | Buat acara kamera (perilaku lama: `{name, type, preset, revealAt}`) |
-| `GET /api/events/:slug` | publik | Detail acara kamera (perilaku lama) |
-| `POST /api/events/:slug/photos` | publik | Unggah foto kamera (multipart, perilaku lama) |
-| `GET /api/events/:slug/photos` | publik | Daftar foto kamera (perilaku lama) |
+| `GET /api/health` | publik | `{ ok, version, uptimeSec, storage:{mode:"drive"|"local", events, photos, stale}, drive:{ready,mode,rootFolderName,rootFolderId}, limits:{maxUploadBytes,maxPhotosPerEvent,undoWindowMs,uploadsPerHour} }` |
+| `POST /api/events` | admin (`x-admin-token`) | Buat acara kamera `{name, type, preset, revealAt}` → menyertakan `uploadKey` (kunci link tamu) |
+| `GET /api/events` | admin | Daftar acara + `count` + `uploadKey` |
+| `GET /api/events/:slug` | publik; `?k=` menambah `uploadKey` | Detail acara + `authorized` (kunci tamu valid?) |
+| `PATCH /api/events/:slug` | admin | Ubah `name`/`preset`/`revealAt`, atau `{rotateUploadKey:true}` untuk mencabut link lama |
+| `DELETE /api/events/:slug` | admin | Hapus acara (folder Drive → Trash) |
+| `POST /api/events/:slug/photos` | kunci tamu (`?k=` / `x-upload-key`) | Unggah foto: **body biner mentah** (`content-type: image/jpeg|png|webp`), maks `maxUploadBytes` |
+| `GET /api/events/:slug/photos` | kunci tamu | Daftar foto; `?since=<iso>` hanya foto baru, `?refresh=1` abaikan cache |
+| `DELETE /api/events/:slug/photos/:photoId` | kunci tamu (≤ `undoWindowMs`) / admin | Hapus foto (Undo) |
+
+Metadata album tidak lagi disimpan di disk server: setiap album punya `event.json` di folder Drive `event-<slug>/`, dan folder Drive itulah sumber kebenaran daftar acara.
+
+Kode error yang sudah dipakai: `invalid-key` (401), `undo-expired` (403), `not-in-event` (403), `photo-limit` (409), `too-large` (413), `unsupported` (415), rate limit (429 + `Retry-After`), `storage-unavailable` (503, metadata dari cache), `drive-not-configured` (503).
+
 
 ## 3. Fase 1 — undangan publik (guest)
 

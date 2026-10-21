@@ -137,3 +137,80 @@ a { color: inherit; }
 .features h2 { margin: 0 0 0.4rem; }
 .features p { color: var(--muted); margin: 0; }
 footer { text-align: center; color: var(--muted); padding: 1.5rem; border-top: 1px solid var(--line); font-size: 0.85rem; }
+
+/* ── Elemen tambahan: status album, antrean offline, Undo ─────────────── */
+
+.page-note.small { padding: 0.4rem 0; font-size: 0.85rem; }
+
+.count-badge {
+  color: var(--muted);
+  font-size: 0.8rem;
+  border: 1px solid var(--line);
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* Pemberitahuan: foto tersimpan di HP, menunggu sinyal / server lambat. */
+.queue-note {
+  max-width: 460px;
+  background: rgba(232, 177, 119, 0.12);
+  border: 1px solid var(--line);
+  color: var(--accent);
+  border-radius: 10px;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.85rem;
+  text-align: center;
+  margin: 0;
+}
+
+/* Kilatan pratinjau setelah memotret. */
+.cam-flash {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  display: grid;
+  place-items: center;
+  z-index: 60;
+  pointer-events: none;
+  animation: flash-out 0.7s forwards;
+}
+.cam-flash img { max-width: 96vw; max-height: 96vh; border-radius: 10px; }
+@keyframes flash-out {
+  0% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Tombol Undo 10 detik setelah foto masuk album. */
+.undo-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0.45rem 0.5rem 0.45rem 1.1rem;
+  font-size: 0.9rem;
+  z-index: 70;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+/* Penanda foto baru muncul di galeri saat polling. */
+.fresh-toast {
+  position: sticky;
+  bottom: 1rem;
+  background: var(--accent);
+  color: #1a1408;
+  font-weight: 700;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+}
+
+.link-row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+.create-form input[readonly] { font-size: 0.8rem; color: var(--muted); }

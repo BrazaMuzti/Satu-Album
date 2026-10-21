@@ -1,0 +1,40 @@
+name: CI (server + client)
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  server:
+    name: Test server (node:test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      # Test memakai klien Drive palsu (server/test/helpers/fake-drive.js),
+      # jadi tidak butuh kredensial Google sama sekali.
+      - name: Jalankan test
+        run: npm test
+        working-directory: server
+
+  client:
+    name: Build client (tsc + vite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+      - run: npm run build
+        working-directory: client

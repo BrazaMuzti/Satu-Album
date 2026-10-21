@@ -21,8 +21,9 @@ import { google } from "googleapis";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCOPES = ["https://www.googleapis.com/auth/drive.file"];
-const FOLDER_MIME = "application/vnd.google-apps.folder";
-const Q = String.fromCharCode(39); /* apostrof, agar query Drive rapi tanpa escape */
+export const FOLDER_MIME = "application/vnd.google-apps.folder";
+/* apostrof, agar query Drive rapi tanpa escape */
+export const Q = String.fromCharCode(39);
 
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
@@ -61,6 +62,27 @@ export function driveAuthMode() {
 
 export function isDriveReady() { return driveAuthMode() !== "none"; }
 
+/* ── Hook khusus test ───────────────────────────────────────────────────
+   Dipakai server/test/* untuk menyuntikkan klien Drive palsu (in-memory) tanpa
+   kredensial Google sungguhan. Tidak pernah dipanggil oleh kode produksi. */
+export function __setDriveClient(client) {
+  driveClient = client;
+  return client;
+}
+
+export function __resetDriveState() {
+  driveClient = null;
+  rootFolderId = "";
+  rootFolderPromise = null;
+  serviceAccountLoaded = false;
+  serviceAccountCreds = null;
+}
+
+export function __setRootFolderId(id) {
+  rootFolderId = id;
+  rootFolderPromise = id ? Promise.resolve(id) : null;
+}
+
 export function driveInfo() {
   const mode = driveAuthMode();
   return {
@@ -73,8 +95,8 @@ export function driveInfo() {
   };
 }
 
-function getClient() {
-  if (driveClient) return driveClient;
+export function getClient() {
+  if (driveClient) return driveClient; /* klien yang sudah dibuat — atau disuntik test */
   const mode = driveAuthMode();
   if (mode === "oauth") {
     const auth = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET);
@@ -91,8 +113,24 @@ function getClient() {
 
 /* URL gambar stabil untuk file Drive yang sudah dibagikan "anyone with link".
    (thumbnailLink dari API bersifat sementara, jadi tidak disimpan.) */
-function imageUrl(fileId, width) {
+export function imageUrl(fileId, width) {
   return "https://drive.google.com/thumbnail?id=" + fileId + "&sz=w" + width;
+}
+
+/** Bagikan file/folder ke "anyone with link" supaya tamu bisa melihat foto. */
+export async function shareAnyone(drive, fileId, label) {
+  try {
+    await drive.permissions.create({ fileId, requestBody: { role: "reader", type: "anyone" } });
+    return true;
+  } catch (err) {
+    console.warn("[drive] " + (label || fileId) + " tidak bisa dibagikan publik: " + err.message);
+    return false;
+  }
+}
+
+/** Nama foto berformat waktu (urut kronologis bila diurutkan sebagai teks). */
+export function photoFileName(ext) {
+  return "photo-" + Date.now() + "-" + Math.floor(Math.random() * 1e6) + "." + (ext || "jpg");
 }
 
 async function canAccessFolder(drive, id) {
@@ -141,7 +179,7 @@ export async function getRootFolderId() {
   return rootFolderPromise;
 }
 
-async function ensureEventFolder(drive, slug) {
+export async function ensureEventFolder(drive, slug) {
   const parentId = await getRootFolderId();
   const name = "event-" + slug;
   const existing = await findFolderByName(drive, name, parentId);
@@ -151,11 +189,7 @@ async function ensureEventFolder(drive, slug) {
     fields: "id",
   });
   const id = created.data.id;
-  try {
-    await drive.permissions.create({ fileId: id, requestBody: { role: "reader", type: "anyone" } });
-  } catch (err) {
-    console.warn("[drive] folder " + name + " tidak bisa dibagikan publik: " + err.message);
-  }
+  await shareAnyone(drive, id, "folder " + name);
   return id;
 }
 
@@ -163,18 +197,14 @@ export async function uploadPhotoToDrive(buffer, mimetype, event) {
   const drive = getClient();
   if (!drive) return null;
   const folderId = await ensureEventFolder(drive, event.slug);
-  const fileName = "photo-" + Date.now() + "-" + Math.floor(Math.random() * 1e6) + ".jpg";
+  const fileName = photoFileName("jpg");
   const res = await drive.files.create({
     requestBody: { name: fileName, parents: [folderId] },
     media: { mimeType: mimetype || "image/jpeg", body: buffer },
-    fields: "id,name",
+    fields: "id,name,createdTime",
   });
   const fileId = res.data.id;
-  try {
-    await drive.permissions.create({ fileId, requestBody: { role: "reader", type: "anyone" } });
-  } catch (err) {
-    console.warn("[drive] " + fileName + " tidak bisa dibagikan publik: " + err.message);
-  }
+  await shareAnyone(drive, fileId, fileName);
   return {
     driveId: fileId,
     url: imageUrl(fileId, IMAGE_WIDTH),
@@ -184,5 +214,6 @@ export async function uploadPhotoToDrive(buffer, mimetype, event) {
     thumbnail: imageUrl(fileId, THUMB_WIDTH),
     viewLink: "https://drive.google.com/file/d/" + fileId + "/view",
     name: fileName,
+    createdTime: res.data.createdTime || null,
   };
 }

@@ -22,7 +22,7 @@
 | Aset | `undangan/assets/img/` kosong, `assets/music/musik.mp3` 0 byte | Tema wajib membawa aset original sendiri |
 | Auth & DB | **Belum ada** auth, belum ada DB | Fase 3 & Fase 0 |
 | Runtime | Node **v26.11.1** → `node:sqlite` tersedia bawaan | DB tanpa dependensi native |
-| Dependensi server | `express, cors, multer, nanoid, googleapis` (belum ada `dotenv` → `.env` saat ini tidak terbaca!) | Perbaiki dengan `node --env-file-if-exists=.env` |
+| Dependensi server | `express, cors, nanoid, googleapis` (tanpa `dotenv` → env dibaca via `node --env-file-if-exists=.env`, lihat `server/src/config.js`) | `multer` sudah dihapus: unggah foto kini biner mentah |
 
 ### 1.2 Tiga surface, satu backend
 

@@ -93,79 +93,100 @@ curl -s http://localhost:3001/api/health
 # {"ok":true,"drive":false,"driveMode":"none","driveRootFolderId":null}
 ```
 
-`drive:false` + `driveMode:"none"` artinya foto akan disimpan lokal ke `server/uploads/` — ini kondisi normal untuk pemakaian lokal.
+`storage.mode:"local"` (atau `drive.ready:false`) artinya foto akan disimpan lokal ke `server/uploads/` — kondisi normal untuk pemakaian lokal, tetapi **hilang saat restart di host gratis**.
 
-### ⚠️ Penting: `npm start` tidak membaca `.env`
+### ✅ `npm start` sudah membaca `.env`
 
-`server/package.json` saat ini berisi `"start": "node index.js"` / `"dev": "node --watch index.js"`, dan proyek **belum memakai `dotenv`**. Artinya variabel di `server/.env` **diabaikan** oleh `npm start`/`npm run dev`. Perbaikannya sudah dijadwalkan di [ROADMAP.md](./ROADMAP.md) Fase 0 menjadi `node --env-file-if-exists=.env index.js`.
+Sejak refactor Drive-as-truth, `server/package.json` memakai flag bawaan Node:
 
-Selama belum diperbaiki, pakai salah satu dari ini:
-
-```bash
-# a) cara yang dipakai di dokumen ini
-node --env-file-if-exists=.env index.js
-
-# b) atau ekspor manual di shell
-export PUBLIC_BASE_URL=http://localhost:3001
-node index.js
-
-# c) atau npm start + env yang sudah ada di lingkungan proses
-npm start          # .env diabaikan, tetapi env dari shell ikut terbaca
+```json
+"start": "node --env-file-if-exists=.env index.js",
+"dev":   "node --env-file-if-exists=.env --watch index.js",
+"token": "node --env-file-if-exists=.env scripts/get-google-refresh-token.js",
+"sync":  "node --env-file-if-exists=.env scripts/sync-drive.mjs",
+"test":  "node --test test/"
 ```
 
-Cara membuktikan sendiri (aman, hanya mengubah `.env` Anda): ubah `PORT` di `server/.env` menjadi `3456`, lalu:
+Jadi cukup `npm start` — tidak perlu `dotenv`, dan `server/.env` ikut terbaca. Konfigurasi dibaca terpusat di `server/src/config.js`; nilai yang tidak valid jatuh ke default dan masalah penting dicetak sebagai peringatan `[config] ...` saat boot (mis. Drive belum dikonfigurasi).
 
 ```bash
-npm start                                 # tetap "on http://0.0.0.0:3001"  → .env diabaikan
-node --env-file-if-exists=.env index.js   # "on http://0.0.0.0:3456"        → .env terbaca
+npm start      # .env terbaca (butuh Node ≥ 20.12)
+npm run dev    # sama + auto-restart saat berkas berubah
 ```
 
 ### Variabel lingkungan yang dikenali server
 
 | Variabel | Default | Fungsi |
 | --- | --- | --- |
-| `PORT` | `3001` | Port HTTP |
+| `ADMIN_TOKEN` | *(kosong → endpoint acara balas 503)* | Token panitia (`x-admin-token`) untuk membuat/mengubah/menghapus acara. **Wajib di produksi.** |
+| `PORT` | `3001` | Port HTTP (`0` = pilih port bebas; Render menyuntikkannya sendiri) |
 | `HOST` | `0.0.0.0` | Bind address (dibutuhkan host cloud) |
 | `PUBLIC_BASE_URL` | *(kosong)* | Awalan absolut URL foto lokal |
 | `ALLOWED_ORIGIN` | *(kosong = semua diizinkan)* | Allowlist CORS, pisahkan dengan koma |
-| `DATA_DIR` | `data` | Folder `events.json` & `photos.json` |
+| `DATA_DIR` | `data` | Folder `events.json` & `photos.json` (hanya dipakai mode lokal) |
 | `UPLOAD_DIR` (atau `LOCAL_UPLOAD_DIR`) | `uploads` | Folder foto fallback lokal |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` | *(kosong)* | Aktifkan mode Drive (lihat §7) |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | `credentials/google-service-account.json` | Legacy; biarkan kosong/tidak ada |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` | *(kosong)* | Aktifkan mode Drive sebagai sumber kebenaran (lihat §7). Tanpa ini server jatuh ke mode lokal |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | `credentials/google-service-account.json` | Legacy; jangan dipakai (kuota storage 0 byte) |
 | `GOOGLE_DRIVE_ROOT_FOLDER_NAME` / `_ROOT_FOLDER_ID` | `Satu-Album` / kosong | Folder tujuan di Drive |
 | `GOOGLE_DRIVE_IMAGE_WIDTH` / `_THUMB_WIDTH` | `1600` / `400` | Ukuran gambar dari endpoint thumbnail Drive |
+| `MAX_UPLOAD_MB` | `8` | Batas ukuran satu foto (server mengembalikan `413` bila lewat) |
+| `MAX_PHOTOS_PER_EVENT` | `800` | Batas foto per album (`409 photo-limit`) |
+| `RATE_CREATE_PER_HOUR` / `RATE_UPLOAD_PER_HOUR` | `10` / `300` | Rate limit per IP (`429` + `Retry-After`) |
+| `SA_UNDO_WINDOW_MS` | `120000` | Jendela Undo tamu (tombol Undo di UI tampil 10 detik) |
+| `SA_CACHE_TTL_MS` | `10000` | Umur cache daftar acara/foto (penjaga kuota Drive API) |
+| `SA_META_FLUSH_MS` | `3000` | Debounce penulisan `event.json` (jumlah foto) |
 
 ### Di mana data disimpan?
 
-| Berkas/folder | Isi | Sifat |
-| --- | --- | --- |
-| `server/data/events.json` | Daftar acara (id, slug, nama, preset, `count`) | JSON, ditulis ulang tiap perubahan |
-| `server/data/photos.json` | Metadata foto (`url`, `thumb`, `source`) | JSON |
-| `server/uploads/` | Berkas foto (hanya bila Drive nonaktif) | Nama `photo-<epoch>-<rand>.jpg` |
+| Mode | Metadata album | Foto | Sifat |
+| --- | --- | --- | --- |
+| **Drive** (produksi) | `<root>/event-<slug>/event.json` | `<root>/event-<slug>/photo-*.jpg` | **Awet** — bertahan setelah restart/redeploy Render |
+| Lokal (dev) | `server/data/events.json` | `server/uploads/photo-*.jpg` | *Ephemeral* di host gratis; aman untuk eksperimen lokal |
 
-Ketiganya di-*ignore* Git, jadi aman untuk eksperimen. **Untuk uji coba terisolasi** (tanpa mengganggu data asli), arahkan ke `/tmp`:
+Server memilih mode otomatis dari ada/tidaknya kredensial Google, lalu mencetak salah satu baris ini saat boot:
+
+```
+penyimpanan: drive (Google Drive = sumber kebenaran)
+penyimpanan: local (disk lokal — HILANG saat restart!)
+```
+
+Folder `data/`, `uploads/`, dan `.env` di-*ignore* Git. **Untuk uji coba terisolasi** (tanpa mengganggu data asli), arahkan ke `/tmp`:
 
 ```bash
 cd ~/Proyek/Satu-Album/server
 DATA_DIR=/tmp/sa-demo/data UPLOAD_DIR=/tmp/sa-demo/uploads PORT=3999 \
-  node --env-file-if-exists=.env index.js
+  npm start
 ```
 
-Contoh alur lengkap yang terverifikasi (buat acara → unggah foto → daftar foto):
+
+Contoh alur lengkap yang terverifikasi (buat album → unggah foto → daftar foto) — memperhatikan otorisasi baru:
 
 ```bash
+ADMIN=demo-admin-token   # samakan dengan ADMIN_TOKEN di server/.env
+
 curl -s -X POST http://localhost:3999/api/events \
-  -H 'content-type: application/json' \
+  -H "x-admin-token: $ADMIN" -H 'content-type: application/json' \
   -d '{"name":"Demo Tutorial","type":"pernikahan","preset":"portra400","revealAt":null}'
-# {"event":{"id":"UXkz1O0fZ7","slug":"demo-tutorial","name":"Demo Tutorial",...,"count":0}}
+# {"event":{"id":"evt_...","slug":"demo-tutorial","name":"Demo Tutorial",...,"uploadKey":"<32 karakter>"}}
 
-curl -s -F "photo=@server/uploads/photo-1792355230619-39083.jpg" \
-  http://localhost:3999/api/events/demo-tutorial/photos
-# {"photo":{"id":"gxAm043iUh","eventSlug":"demo-tutorial",
-#           "url":"/uploads/photo-1792615870356-3144.jpg","source":"local",...}}
+KEY=<uploadKey dari respons di atas>
 
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3999/api/events/tidak-ada   # 404
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3999/uploads/<nama-berkas>  # 200
+# Unggah foto sebagai biner mentah (bukan multipart)
+curl -s -X POST "http://localhost:3999/api/events/demo-tutorial/photos" \
+  -H 'content-type: image/jpeg' -H "x-upload-key: $KEY" \
+  --data-binary @server/uploads/photo-1792355230619-39083.jpg
+# {"photo":{"id":"1AbC...","eventSlug":"demo-tutorial","url":"/uploads/photo-1792615870356-3144.jpg","source":"local"},
+#  "undoWindowMs":120000,"serverTime":"..."}
+
+# Daftar foto (butuh kunci tamu)
+curl -s "http://localhost:3999/api/events/demo-tutorial/photos?k=$KEY"
+# {"photos":[...],"count":1,"stale":false}
+
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3999/api/events/tidak-ada        # 404
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3999/api/events/demo-tutorial/photos   # 401 (tanpa kunci)
+```
+
+Di UI, panitia tidak perlu `curl`: buka `/create`, isi token admin di kolom pertama, buat album, lalu salin **link kamera** yang muncul (link sudah membawa `?k=<uploadKey>`).
 ```
 
 Perhatikan `"url":"/uploads/..."` — URL **relatif** karena `PUBLIC_BASE_URL` kosong. Itu benar untuk dev (proxy Vite meneruskan `/uploads` ke server). Untuk produksi lintas domain, isi `PUBLIC_BASE_URL` (lihat §12).
@@ -445,7 +466,7 @@ Skrip aman dijalankan berulang pada berkas yang sama (`CREATE ... IF NOT EXISTS`
 | Kamera tidak muncul, `NotAllowedError` | Izin ditolak, atau bukan *secure context* | Akses lewat `http://localhost` atau HTTPS; aktifkan izin Camera pada ikon 🔒 |
 | `NotFoundError`/`OverconstrainedError` saat buka kamera | Tidak ada kamera (PC tanpa webcam) | Uji dari ponsel via HTTPS (tunnel) |
 | Foto tidak muncul di galeri | Foto tersimpan lokal (`/uploads/...`) tetapi `UPLOAD_DIR`/`PUBLIC_BASE_URL` salah untuk domain yang dipakai | Cek `curl -I http://localhost:3001/uploads/<berkas>`; isi `PUBLIC_BASE_URL` untuk akses lintas domain |
-| Perubahan di `server/.env` tidak berefek | `npm start` tidak membaca `.env` (§4) | Pakai `node --env-file-if-exists=.env index.js` |
+| Perubahan di `server/.env` tidak berefek | Proses lama masih jalan, atau Node terlalu tua untuk `--env-file-if-exists` | Hentikan lalu jalankan ulang `npm start` (butuh Node ≥ 20.12); cek nilai efektif lewat `curl -s localhost:3001/api/health` |
 | Upload gagal: `storageQuotaExceeded` | Masih memakai service account | Pindah ke OAuth2 akun pribadi (§7) |
 | Upload gagal: `invalid_grant` | Consent masih *Testing* (>7 hari) atau akses app dicabut | Publish app ke *In production*, lalu `npm run token` ulang |
 | `npm install` gagal (`EBADENGINE`, galat sintaks ESM) | Node terlalu tua | Pakai Node ≥ 20 (`node -v`); proyek ini diuji di Node v26.11.1 |
@@ -467,16 +488,18 @@ Jalankan berurutan; semuanya sudah terbukti bekerja pada repo ini.
 
 | # | Langkah | Ekspektasi |
 | --- | --- | --- |
-| 1 | `node -v && npm -v` | v20+ / npm terpasang |
+| 1 | `node -v && npm -v` | v20.12+ / npm terpasang |
 | 2 | `cd server && npm install` | Selesai tanpa galat |
-| 3 | `node --env-file-if-exists=.env index.js` | `satualbum api on http://0.0.0.0:3001` |
-| 4 | `curl -s localhost:3001/api/health` | `{"ok":true,"drive":false,"driveMode":"none",...}` |
-| 5 | `curl -s -X POST localhost:3001/api/events -H 'content-type: application/json' -d '{"name":"Tes Cepat"}'` | `{"event":{"slug":"tes-cepat",...}}` |
-| 6 | `cd ../client && npm install && npm run dev` | `VITE v5.4.21 ready` di `http://localhost:5173` |
-| 7 | Buka `http://localhost:5173/create`, buat album, lalu `/events/<slug>/camera` | Kamera tampil & bisa memotret |
-| 8 | `curl -s localhost:3001/api/events/<slug>/photos` | `{"photos":[...]}` (foto dari langkah 7) |
-| 9 | `cd ../undangan && python3 -m http.server 8090` → buka `http://localhost:8090/undangan.html?to=Bapak%20Andi` | Cover + nama tamu terisi |
-| 10 | `cd .. && node /tmp/cek-skema.mjs docs/DB-SCHEMA.sql` | `OK: 35 tabel, 1 view  (db: :memory:)` |
+| 3 | `cp ../.env.example .env` → isi `ADMIN_TOKEN=tes-admin` | `.env` siap |
+| 4 | `npm start` | `satualbum api v1.1.0 on http://0.0.0.0:3001` + baris `penyimpanan: ...` |
+| 5 | `curl -s localhost:3001/api/health` | `{"ok":true,"version":"1.1.0","storage":{"mode":"local"|"drive"},"drive":{...}}` |
+| 6 | `curl -s -X POST localhost:3001/api/events -H 'content-type: application/json' -H 'x-admin-token: tes-admin' -d '{"name":"Tes Cepat"}'` | `{"event":{"slug":"tes-cepat",...,"uploadKey":"..."}}` (401 bila token salah) |
+| 7 | `cd ../client && npm install && npm run dev` | `VITE v5.4.21 ready` di `http://localhost:5173` |
+| 8 | Buka `http://localhost:5173/create` → isi token admin → buat album → salin link kamera | Muncul dua kotak link (kamera & galeri) |
+| 9 | Buka link kamera → izinkan kamera → *Potret* | Foto masuk album + tombol Undo 10 detik |
+| 10 | `npm test` di `server/` | `pass 31 / fail 0` (termasuk uji restart Drive) |
+| 11 | `cd ../undangan && python3 -m http.server 8090` → buka `http://localhost:8090/undangan.html?to=Bapak%20Andi` | Cover + nama tamu terisi |
+| 12 | `cd .. && node /tmp/cek-skema.mjs docs/DB-SCHEMA.sql` | `OK: 35 tabel, 1 view  (db: :memory:)` |
 
 ## 12. Menjalankan di produksi (ringkas)
 
@@ -484,14 +507,16 @@ Panduan langkah-demi-langkah ada di [DEPLOYMENT.md](../DEPLOYMENT.md); ini ringk
 
 | Bagian | Host | Root Directory | Build | Start/Output | Env wajib |
 | --- | --- | --- | --- | --- | --- |
-| `server/` | Render (atau Railway/Fly.io/VPS) | `server` | `npm install` | `npm start` | `NODE_VERSION=22`, `PUBLIC_BASE_URL`, `ALLOWED_ORIGIN` |
-| `client/` | Vercel | `client` | `npm run build` | `dist` | `VITE_API_BASE=https://<api>.onrender.com` |
+| `server/` | Render free (blueprint `render.yaml`) | `server` | `npm install` | `npm start` | `NODE_VERSION=22`, `ADMIN_TOKEN`, `PUBLIC_BASE_URL`, `ALLOWED_ORIGIN`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
+| `client/` | GitHub Pages (workflow) / Vercel | `client` | `npm run build` | `dist` | `VITE_API_BASE=https://<api>.onrender.com` (+ `VITE_BASE=/<repo>/` untuk Pages) |
 | `undangan/` | Vercel / GitHub Pages | `undangan` | — | folder statis | — |
 
-- Repo sudah menyertakan `render.yaml` (blueprint Render) dan `client/vercel.json` (*rewrite* SPA + output `dist`); tetap isi env var manual karena `sync: false`.
+- Repo menyertakan `render.yaml` (blueprint Render), `.github/workflows/deploy-client-pages.yml` (deploy SPA ke Pages), `.github/workflows/ci.yml` (test + build), dan `client/vercel.json` (*rewrite* SPA).
 - **HTTPS wajib** untuk fitur kamera; semua host di atas menyediakannya otomatis.
-- Untuk lingkungan produksi, isi `PUBLIC_BASE_URL` agar URL foto lokal menjadi absolut, dan `ALLOWED_ORIGIN` dengan domain client (tanpa *trailing slash*, pisahkan dengan koma).
-- Disk Render *ephemeral*: pakai OAuth2 Drive (§7) dan/atau disk permanen (`DATA_DIR=/data`, `UPLOAD_DIR=/data/uploads`) supaya data tidak hilang saat redeploy.
+- Isi `PUBLIC_BASE_URL` agar URL foto lokal menjadi absolut, dan `ALLOWED_ORIGIN` dengan origin client (tanpa *trailing slash*, pisahkan dengan koma). Pages mengirim `Origin` berupa `https://<user>.github.io` (tanpa path repo).
+- Disk Render *ephemeral* → **jangan** mengandalkan mode lokal di produksi. Isi kredensial Google agar `storage.mode = "drive"`; metadata album (`event.json`) dan foto akan bertahan di Drive setelah restart.
+- Cek kesiapan album kapan saja dengan `cd server && npm run sync`.
+
 
 ```bash
 # contoh: push lalu deploy lewat dashboard Render & Vercel
@@ -503,8 +528,10 @@ git add -A && git commit -m "Update" && git push origin master
 
 Yang **sudah bisa dijalankan hari ini** (terverifikasi di dokumen ini):
 
-- API Express + penyimpanan JSON/foto lokal, termasuk fallback lokal tanpa Drive.
-- SPA kamera: buat album, 6 preset film, kamera live, galeri per `slug`.
+- API Express + **Google Drive sebagai sumber kebenaran** (metadata `event.json` + foto), dengan fallback disk lokal untuk pengembangan.
+- Otorisasi praktis: token admin untuk panitia (`x-admin-token`), kunci album di link tamu (`?k=`).
+- SPA kamera: buat album + link siap-bagikan, 6 preset film, kamera live, **unggah otomatis** (2048 px), tombol **Undo 10 detik**, **antrean offline**, galeri yang menyegarkan diri tiap 20 detik.
+- 31 test otomatis (`npm test`), termasuk klien Drive palsu dan uji “restart” tanpa kehilangan album.
 - Undangan statis (cover, countdown, kalender, amplop, RSVP/buku tamu ke GAS).
 - Skema database lengkap (`docs/DB-SCHEMA.sql`) yang bisa diuji tanpa mengganggu data.
 
@@ -512,9 +539,11 @@ Yang **belum tersambung**:
 
 | Item | Kondisi | Rencana |
 | --- | --- | --- |
-| Skema SQL → aplikasi | `docs/DB-SCHEMA.sql` masih dokumen; aplikasi memakai JSON | Fase 0–1: `server/migrations/0001_init.sql` + repositori SQLite (`node:sqlite`) |
-| `.env` server | Tidak dibaca `npm start` | Fase 0: perbaiki skrip npm (§4) |
+| Skema SQL → aplikasi | `docs/DB-SCHEMA.sql` masih dokumen; aplikasi memakai Drive/JSON | Fase 0–1: `server/migrations/0001_init.sql` + repositori SQLite (`node:sqlite`) |
+| `.env` server | ~~Tidak dibaca `npm start`~~ → **sudah diperbaiki** (`--env-file-if-exists`, §4) | — |
+| Moderasi/panel panitia | Belum ada UI; saat ini lewat `curl` (lihat DEPLOYMENT.md §7) | Fase 3–4 dashboard |
 | RSVP/buku tamu backend | Masih mengarah ke Google Apps Script | Fase 2 per [API.md](./API.md) |
+
 | Undangan per acara | `undangan/undangan.html` masih menampilkan pasangan contoh "Ani & Budi" | Fase 3–4: render dari data acara |
 | Blok undangan lengkap | 15 dari 27 blok belum dibuat | [BLOCKS.md](./BLOCKS.md) + [ROADMAP.md](./ROADMAP.md) |
 | Tema premium, kamera tamu (guestcam), peran vendor | Belum ada | Fase 8 dst. (keputusan R3/R4) |

@@ -3,10 +3,18 @@ import { applyPreset, PresetId, presetById } from "./filmPresets";
 
 interface Props {
   preset: PresetId;
-  onCapture: (blob: Blob, dataUrl: string) => void;
+  /** Dipanggil dengan JPEG yang sudah dikecilkan + diberi warna film. */
+  onCapture: (blob: Blob) => void;
+  /** Nonaktifkan shutter saat unggahan sedang padat. */
+  disabled?: boolean;
 }
 
-export default function CameraCapture({ preset, onCapture }: Props) {
+/* Sisi terpanjang gambar yang dikirim. 2048px ~150-400 KB per foto: cukup tajam
+   untuk cetak 4R, tapi hemat kuota Drive dan cepat diunggah dari sinyal acara. */
+const MAX_EDGE = 2048;
+const JPEG_QUALITY = 0.85;
+
+export default function CameraCapture({ preset, onCapture, disabled }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -19,7 +27,7 @@ export default function CameraCapture({ preset, onCapture }: Props) {
     try {
       if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
       const s = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facing },
+        video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 2560 } },
         audio: false,
       });
       streamRef.current = s;
@@ -28,30 +36,60 @@ export default function CameraCapture({ preset, onCapture }: Props) {
         await videoRef.current.play();
       }
     } catch (e) {
-      setError((e as Error).message || "Camera unavailable");
+      setError((e as Error).message || "Kamera tidak tersedia. Izinkan akses kamera lalu muat ulang.");
     }
   }, [facing]);
 
-  useEffect(() => { start(); return () => { streamRef.current?.getTracks().forEach((t) => t.stop()); }; }, [start]);
+  useEffect(() => {
+    start();
+    return () => {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, [start]);
 
+  /* Ambil frame → kecilkan → beri warna film → JPEG.
+     Preset dijalankan pada gambar yang SUDAH dikecilkan supaya hemat CPU HP. */
   const capture = useCallback(() => {
-    const video = videoRef.current, canvas = canvasRef.current;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
     if (!video || !canvas) return;
-    if (video.videoWidth === 0) { setError("No frame yet"); return; }
+    if (video.videoWidth === 0) {
+      setError("Frame kamera belum siap, coba lagi sebentar.");
+      return;
+    }
     setBusy(true);
-    const w = video.videoWidth, h = video.videoHeight;
-    canvas.width = w; canvas.height = h;
+    setError(null);
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const scale = Math.min(1, MAX_EDGE / Math.max(vw, vh));
+    const w = Math.max(1, Math.round(vw * scale));
+    const h = Math.max(1, Math.round(vh * scale));
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx) {
+      setBusy(false);
+      return;
+    }
+    if (facing === "user") {
+      /* Cermin untuk kamera depan supaya hasilnya sesuai yang dilihat tamu. */
+      ctx.translate(w, 0);
+      ctx.scale(-1, 1);
+    }
     ctx.drawImage(video, 0, 0, w, h);
-    if (facing === "user") { ctx.translate(w, 0); ctx.scale(-1, 1); ctx.drawImage(video, 0, 0, w, h); }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     const img = ctx.getImageData(0, 0, w, h);
     applyPreset(img, preset, Math.floor(Math.random() * 65535));
     ctx.putImageData(img, 0, 0);
-    canvas.toBlob((blob) => {
-      if (blob) onCapture(blob, canvas.toDataURL("image/jpeg", 0.92));
-      setBusy(false);
-    }, "image/jpeg", 0.92);
+    canvas.toBlob(
+      (blob) => {
+        if (blob) onCapture(blob);
+        else setError("Gagal memproses foto, coba sekali lagi.");
+        setBusy(false);
+      },
+      "image/jpeg",
+      JPEG_QUALITY
+    );
   }, [facing, preset, onCapture]);
 
   const flip = () => setFacing((f) => (f === "environment" ? "user" : "environment"));
@@ -64,8 +102,12 @@ export default function CameraCapture({ preset, onCapture }: Props) {
         <span className="preset-tag">{presetById(preset).label}</span>
       </div>
       <div className="cam-controls">
-        <button className="btn ghost" onClick={flip}>⇄ Flip</button>
-        <button className="btn shutter" onClick={capture} disabled={busy}>{busy ? "Saving…" : "Capture"}</button>
+        <button className="btn ghost" onClick={flip} disabled={busy}>
+          ⇄ Flip
+        </button>
+        <button className="btn shutter" onClick={capture} disabled={busy || disabled}>
+          {busy ? "Memproses…" : "Potret"}
+        </button>
       </div>
       <canvas ref={canvasRef} style={{ display: "none" }} />
     </div>
