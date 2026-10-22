@@ -9,7 +9,7 @@
     "dev": "node --env-file-if-exists=.env --watch index.js",
     "token": "node --env-file-if-exists=.env scripts/get-google-refresh-token.js",
     "sync": "node --env-file-if-exists=.env scripts/sync-drive.mjs",
-    "test": "node --test test/"
+    "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
     "cors": "^2.8.5",
