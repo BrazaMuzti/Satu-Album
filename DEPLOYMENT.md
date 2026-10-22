@@ -101,6 +101,8 @@ SPA sudah siap untuk Pages: `client/vite.config.ts` memakai `VITE_BASE`, router 
 | --- | --- |
 | `VITE_API_BASE` | `https://<service>.onrender.com` (tanpa garis miring di akhir) |
 
+> 🔁 `VITE_API_BASE` disuntikkan **saat build** (bukan saat runtime). Setelah mengubah variabelnya, jalankan ulang workflow: **Actions → Deploy client ke GitHub Pages → Run workflow** (atau `git commit --allow-empty -m "redeploy"`).
+
 3. Push ke branch `master` (atau jalankan workflow **Deploy client ke GitHub Pages** manual). Workflow `.github/workflows/deploy-client-pages.yml` akan build dengan `VITE_BASE=/<nama-repo>/`.
 4. Buka `https://<user>.github.io/<repo>/` → halaman beranda muncul.
 5. Kembali ke Render: pastikan `ALLOWED_ORIGIN` memuat `https://<user>.github.io` (origin saja, **tanpa** path repo). Pages selalu mengirim header `Origin`, jadi allowlist harus spesifik.
