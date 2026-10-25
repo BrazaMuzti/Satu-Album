@@ -1,204 +1,251 @@
 # Satu-Album
 
-Kamera sekali pakai digital. Buat sebuah album, bagikan link-nya, dan biarkan tamu memotret melalui browser dengan warna film analog (color grading di canvas). Hasil foto terkumpul di galeri bersama.
+Kamera sekali pakai digital untuk acara. Buat satu album, bagikan link-nya, dan tamu memotret lewat browser (warna film analog di-render di canvas). Semua foto terkumpul di galeri bersama.
 
-## Dokumentasi
+**Arsitektur: 100% Google Apps Script.** Tidak ada server Node, tidak ada `npm install`, tidak ada langkah build.
 
-Spesifikasi produk & teknis (ditulis sebelum implementasi):
+| Lapisan | Teknologi | Lokasi |
+| --- | --- | --- |
+| API & logika bisnis | Google Apps Script (runtime V8) | `gas/*.gs` |
+| Database | Google Sheets — 1 spreadsheet, 8 tab | `Events`, `Photos`, `RSVP`, … |
+| Penyimpanan foto | Google Drive — folder per acara | `Satu-Album/event-<slug>/` |
+| Cache & rate limit | Apps Script `CacheService` | otomatis (kode di `gas/Lib.gs`) |
+| Frontend statis | HTML/CSS/JS tanpa build (GitHub Pages) | `web/` — **belum ada di repo** |
+| Test & CI | Node `node:test` + GitHub Actions | `gas/test/`, `.github/workflows/` |
 
-| Dokumen | Isi |
-| --- | --- |
-| [docs/PRD.md](docs/PRD.md) | Visi, persona, user story, functional & non-functional requirement, risiko |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Prinsip, keputusan arsitektur (ADR), peta surface, lapisan server |
-| [docs/DB-SCHEMA.sql](docs/DB-SCHEMA.sql) | Skema database lengkap (SQLite `node:sqlite`, portabel ke PostgreSQL) |
-| [docs/PERMISSIONS.md](docs/PERMISSIONS.md) | Peran & matriks izin, mekanisme override, rencana uji |
-| [docs/BLOCKS.md](docs/BLOCKS.md) | Katalog blok undangan + skema config + kontrak payload |
-| [docs/THEMES.md](docs/THEMES.md) | Kontrak `theme.json`, 2 tema MVP, roadmap 18 tema, checklist |
-| [docs/API.md](docs/API.md) | Kontrak endpoint per fase + contoh request/response |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Fase 0–10, definition of done, strategi uji, struktur file target |
-| [docs/CARA-MENJALANKAN.md](docs/CARA-MENJALANKAN.md) | **Tutorial lengkap menjalankan**: prasyarat, instalasi, server/client/undangan, build produksi, env, troubleshooting |
+> `web/` (frontend) belum ditulis. Karena itu workflow [deploy-pages.yml](.github/workflows/deploy-pages.yml) hanya menyala saat ada perubahan di `web/**` dan langsung gagal dengan pesan jelas bila `web/index.html` tidak ada.
 
-## Fitur
+## Alur singkat
 
-- **Kamera live di browser** — `getUserMedia` + `canvas`, tanpa aplikasi tambahan.
-- **6 preset warna film** — tone curve, warna, grain, vignette, dan light leak di-render langsung di canvas.
-- **Potret sekali tekan, langsung terunggah** — foto dikecilkan ke 2048 px di HP (hemat kuota), lalu dikirim otomatis. Ada tombol **Undo** 10 detik.
-- **Antrean offline** — sinyal hilang di tengah acara? Foto disimpan di HP (IndexedDB) dan dikirim otomatis saat jaringan kembali.
-- **Galeri hidup** — menyegarkan sendiri tiap 20 detik tanpa mengunduh ulang seluruh daftar.
-- **Google Drive sebagai sumber kebenaran** — metadata album (`event.json`) dan foto hidup di Drive, jadi album tetap utuh walau server gratis restart/tidur. Tanpa kredensial Drive, server otomatis memakai disk lokal (mode pengembangan).
+```
+Tamu  ──▶ web/camera.html#<slug>?k=<join_key>   ──┐
+Tamu  ──▶ web/galeri.html#<slug>?k=<join_key>   ──┤  POST JSON (text/plain)
+Tamu  ──▶ web/undangan.html · rsvp.html         ──┤  action=<nama>
+Admin ──▶ halaman admin (mis. web/admin.html)   ──┘
+                                                  │
+                             Google Apps Script Web App (/exec)  ◀── gas/*.gs
+                                                  │
+                     ┌────────────────────────────┴────────────────────────────┐
+                     │                                                        │
+        Google Sheets (8 tab)                                  Google Drive (foto)
+        Admin · Events · Photos · Templates                    Satu-Album/
+        PrintOrders · PrintItems · RSVP · Guestbook               └── event-<slug>/photo-*.jpg
+```
 
-## Arsitektur
+1. Admin login dengan PIN (`action=login`) → dapat token sesi HMAC (`sid`), lalu membuat acara (`action=createEvent`).
+2. Setiap acara punya `join_key` 32 hex; link kamera/galeri/undangan/RSVP dibentuk dari `BASE_URL` + slug + kunci itu.
+3. Tamu mengunggah foto (base64 di body JSON) → berkas masuk folder Drive acara dan dicatat di tab `Photos`; baris foto bisa dibatalkan tamu selama jendela Undo.
+4. Galeri mengambil daftar dari tab `Photos` (di-cache singkat) dan menampilkan thumbnail Drive — tanpa menyentuh Drive saat baca.
+
+## Isi repo
 
 ```
 Satu-Album/
-├── server/                 # Express API (Node ESM)
-│   ├── index.js            # routes + boot (sync Drive saat start)
-│   ├── store.js            # fasad penyimpanan: cache TTL, pilih backend, flush metadata
-│   ├── drive.js            # klien Google Drive (OAuth2, scope drive.file)
-│   ├── src/
-│   │   ├── config.js       # semua env dibaca & divalidasi di sini
-│   │   ├── drive-store.js  # backend Drive: event.json + photo-*.jpg  ← sumber kebenaran
-│   │   ├── local-store.js  # backend disk lokal (dev / tanpa Drive)
-│   │   ├── middleware/admin.js  # token admin & kunci tamu (timing-safe)
-│   │   └── lib/            # slug, validasi gambar (magic bytes), rate limit, error
-│   ├── scripts/            # get-google-refresh-token.js, sync-drive.mjs
-│   └── test/               # node:test — termasuk fake Google Drive
-├── client/                 # Vite + React + TypeScript (SPA)
-│   └── src/                # api, uploadQueue, filmPresets, Camera, Gallery, Create
-├── .github/workflows/      # CI (test + build) & deploy Pages
-├── render.yaml             # blueprint deploy server
-└── DEPLOYMENT.md           # panduan deploy Render + Google Drive + Pages
+├── gas/                       # backend Apps Script (11 berkas .gs + manifest)
+│   ├── Code.gs                # doGet/doPost, dispatcher action, tabel API_ROUTES
+│   ├── Config.gs              # semua nilai dari Script Properties + default aman
+│   ├── Auth.gs                # PIN admin, token sesi HMAC, logout & ganti PIN
+│   ├── Sheets.gs              # satu-satunya lapisan yang menyentuh SpreadsheetApp
+│   ├── DriveStore.gs          # folder acara, unggah/hapus/sinkron foto, health
+│   ├── Events.gs              # CRUD acara, slug, join key, link publik per halaman
+│   ├── Templates.gs           # template undangan (teks, warna, layout, musik)
+│   ├── PrintOrders.gs         # daftar cetak: order + item, dedupe 5 menit
+│   ├── Interactions.gs        # RSVP (upsert per kontak) & buku tamu
+│   ├── Lib.gs                 # envelope respons, cache, rate limit, slug, MIME
+│   ├── Setup.gs               # fungsi manual: initSheets, selfTest, trigger, dsb.
+│   ├── appsscript.json        # manifest: zona waktu, scope OAuth, mode web app
+│   └── test/                  # test lokal + CI (tanpa kredensial Google)
+│       ├── harness.mjs        # tiruan SpreadsheetApp/DriveApp/CacheService/Properties
+│       ├── api.test.mjs       # 36 test end-to-end router Code.gs
+│       ├── syntax.mjs         # kompilasi semua .gs lewat vm.Script
+│       └── refs.mjs           # deteksi helper yang dipanggil tapi tidak terdefinisi
+├── .github/workflows/
+│   ├── ci.yml                 # syntax + refs + node:test (Node 22, tanpa npm)
+│   └── deploy-pages.yml       # deploy folder web/ ke GitHub Pages
+└── docs/                      # dokumen produk/teknis (lihat bagian Dokumentasi)
 ```
 
+`web/` akan berisi halaman statis: `index.html`, `admin.html`, `camera.html`, `galeri.html`, `undangan.html`, `rsvp.html`, plus `assets/` (lihat [gas/Events.gs](gas/Events.gs) `eventLinks_` dan langkah 2 di [gas/Setup.gs](gas/Setup.gs) `initSheets`).
 
-## Menjalankan (Lokal & Online)
+## Mulai cepat
 
-Panduan langkah-demi-langkah untuk lokal (server, client, undangan, build, troubleshooting) ada di **[*docs/CARA-MENJALANKAN.md*](docs/CARA-MENJALANKAN.md)**.
+1. **Spreadsheet database** — buat Google Sheets baru, salin ID dari URL (`.../spreadsheets/d/<SHEET_ID>/edit`).
+2. **Project Apps Script** — buka [script.google.com](https://script.google.com) → *New project* → salin seluruh isi `gas/Code.gs`, `Config.gs`, `Auth.gs`, `Sheets.gs`, `DriveStore.gs`, `Events.gs`, `Templates.gs`, `PrintOrders.gs`, `Interactions.gs`, `Lib.gs`, `Setup.gs`, lalu timpa `appsscript.json` (Project Settings → *Show "appsscript.json"*).
+3. **Script Properties** — Project Settings → *Script properties*: `SHEET_ID`, `ADMIN_PIN`, `SESSION_SECRET`.
+4. **Jalankan `initSheets`** dari editor — membuat 8 tab + header, baris Admin pertama, dan root folder Drive.
+5. **Deploy** — *Deploy → New deployment → Web app* (Execute as: **Me**, Who has access: **Anyone**) → salin URL `/exec` ke konstanta `API_BASE` di `web/assets/app.js`.
 
-Untuk host di produksi (Render free + Google Drive + GitHub Pages), lihat **[DEPLOYMENT.md](DEPLOYMENT.md)**.
+Langkah rinci (termasuk GitHub Pages, troubleshooting, dan checklist 10 menit) ada di **[docs/CARA-MENJALANKAN.md](docs/CARA-MENJALANKAN.md)**.
 
-### 1. Server
+## Fungsi manual di editor Apps Script (`gas/Setup.gs`)
 
-```bash
-cd server
-npm install
-cp ../.env.example .env   # lalu isi ADMIN_TOKEN (wajib) & kredensial Google
-npm start                # Express di http://localhost:3001 (otomatis membaca server/.env)
-npm test                 # 31 test (node:test) — tidak butuh kredensial Google
+Semua fungsi ini dijalankan manual dari editor (*pilih fungsi → Run*), tidak pernah dipanggil dari web app.
+
+| Fungsi | Kegunaan |
+| --- | --- |
+| `initSheets()` | Sekali saja: buat 8 tab + header, seed baris Admin dari `ADMIN_PIN`, buat root folder Drive. Idempoten. |
+| `setBaseUrl()` | Set `BASE_URL` (dipakai membuat link QR/undangan) dari konstanta `SETUP_DEFAULT_BASE_URL`. |
+| `showHealth()` | Ringkasan: mode `sheets+drive`, versi config, jumlah baris per tab, batas unggah, error yang muncul. |
+| `showEvents()` | Daftar acara + link kamera/galeri/undangan/RSVP-nya. |
+| `syncAllDrivePhotos()` | Pindai semua folder `event-*` dan catat berkas yang belum ada di tab `Photos` (mis. unggahan manual lewat aplikasi Drive). |
+| `installDriveSyncTrigger()` | Pasang trigger time-based setiap 6 jam untuk `syncAllDrivePhotos`. |
+| `selfTest()` | Uji cepat config, spreadsheet, skema, root folder, daftar acara, dan cache round-trip. |
+
+## API (RPC)
+
+Apps Script hanya punya `doGet`/`doPost` dan tidak bisa mengatur status code/header, jadi seluruh API berbentuk RPC dengan envelope JSON:
+
+```
+GET  <URL>/exec?action=<nama>&<param>=...
+POST <URL>/exec     body JSON (content-type: text/plain) — action boleh di body atau query
 ```
 
-Kebutuhan env (lihat `.env.example`):
+| Envelope | Isi |
+| --- | --- |
+| Sukses | `{ "ok": true, "data": {...}, "serverTime": "2026-01-01T00:00:00.000Z" }` |
+| Gagal | `{ "ok": false, "status": 401, "code": "invalid-key", "error": "...", "serverTime": "..." }` |
 
-| Variabel | Wajib | Fungsi |
+Selalu HTTP 200 dari Apps Script; `status` di dalam body adalah status HTTP yang "seharusnya". Body dikirim sebagai `text/plain` supaya tidak memicu preflight `OPTIONS` (Apps Script tidak punya `doOptions`), dan Apps Script sendiri mengirim `Access-Control-Allow-Origin: *`. `GET ...&callback=fn` menghasilkan JSONP.
+
+**Otorisasi:** admin memakai token sesi `sid` (HMAC-SHA256, 8 jam) yang dikirim di body/query; tamu memakai `slug` + kunci `k` (32 hex) dari link. Action admin (`events`, `createEvent`, `updateEvent`, `deleteEvent`, `syncPhotos`, `saveTemplate`, `listPrintOrders`, `updatePrintOrderStatus`, `listRsvp`, `deleteGuestbook`, `me`, `logout`) menolak permintaan tanpa sesi valid.
+
+| Action | Akses | Fungsi |
 | --- | --- | --- |
-| `ADMIN_TOKEN` | **ya** (produksi) | token panitia untuk membuat/mengubah/menghapus acara (`x-admin-token`) |
-| `PUBLIC_BASE_URL` | produksi | URL publik API, agar URL foto fallback lokal menjadi absolut |
-| `ALLOWED_ORIGIN` | produksi | allowlist CORS domain client (pisahkan dengan koma; kosong = izinkan semua) |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN` | produksi | OAuth2 akun Google untuk Drive (sumber kebenaran) |
-| `GOOGLE_DRIVE_ROOT_FOLDER_NAME` | opsional | nama folder Drive tujuan (default `Satu-Album`, dibuat otomatis oleh server) |
-| `GOOGLE_DRIVE_ROOT_FOLDER_ID` | opsional | ID folder Drive tujuan (hanya bila folder dibuat oleh app) |
-| `PORT` / `HOST` | opsional | port (default 3001) & bind address (default `0.0.0.0`) |
-| `MAX_UPLOAD_MB` / `MAX_PHOTOS_PER_EVENT` | opsional | batas 8 MB/foto & 800 foto/album |
-| `RATE_CREATE_PER_HOUR` / `RATE_UPLOAD_PER_HOUR` | opsional | rate limit per IP (10 & 300 per jam) |
-| `SA_UNDO_WINDOW_MS` / `SA_CACHE_TTL_MS` / `SA_META_FLUSH_MS` | opsional | jendela Undo 2 menit, cache 10 detik, debounce metadata 3 detik |
-| `DATA_DIR` / `UPLOAD_DIR` | opsional | folder JSON & upload lokal (default `data` / `uploads`) |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | opsional (legacy) | service account; kuota storage 0 byte sehingga umumnya gagal |
-
-
-Tanpa kredensial Drive, server otomatis menyimpan foto ke `UPLOAD_DIR` (fallback lokal).
-
-#### Mengaktifkan Google Drive (OAuth2 akun pribadi)
-
-Service account punya kuota penyimpanan **0 byte**, jadi upload ke My Drive hampir selalu gagal (`storageQuotaExceeded`). OAuth2 akun pribadi membuat foto masuk ke kuota Drive Anda sendiri.
-
-1. Google Cloud Console → aktifkan **Google Drive API**.
-2. **OAuth consent screen**: User type *External*, tambahkan scope `https://www.googleapis.com/auth/drive.file` (non-sensitive, tanpa proses verifikasi), lalu **Publish app → In production**. Selama status masih *Testing*, refresh token otomatis kedaluwarsa dalam **7 hari**.
-3. **Credentials → Create credentials → OAuth client ID → Desktop app** → salin Client ID & Client Secret.
-4. Ambil refresh token dengan helper yang disertakan:
-
-```bash
-cd server
-GOOGLE_CLIENT_ID=xxx GOOGLE_CLIENT_SECRET=yyy npm run token
-# buka URL yang dicetak → setujui → salin GOOGLE_REFRESH_TOKEN ke .env
-```
-
-5. Isi `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` di `.env` lalu restart. Cek `GET /api/health` → `{"ok":true,"storage":{"mode":"drive"},"drive":{"ready":true,"mode":"oauth"}}`.
-
-> ⚠️ Scope `drive.file` hanya memberi akses ke file yang **dibuat oleh app ini**. Karena itu folder root (`GOOGLE_DRIVE_ROOT_FOLDER_NAME`, default `Satu-Album`) dibuat otomatis oleh server — folder yang dibuat manual lewat web Drive tidak akan terlihat. URL foto memakai `https://drive.google.com/thumbnail?id=<fileId>&sz=w1600` (dan `w400` untuk thumbnail), bukan `uc?export=view` yang sering gagal render.
-
-### Layout di Google Drive
-
-```
-Satu-Album/                      ← GOOGLE_DRIVE_ROOT_FOLDER_NAME (dibuat otomatis)
-└── event-<slug>/
-    ├── event.json               ← metadata album: nama, film, revealAt, kunci tamu, jumlah foto
-    └── photo-<timestamp>.jpg    ← foto asli
-```
-
-`event.json` inilah yang membuat galeri tetap hidup setelah Render restart. Untuk memeriksa atau merapikan isinya:
-
-```bash
-cd server && npm run sync        # daftar album + jumlah foto + ukuran (memperbaiki event.json bila perlu)
-cd server && npm run sync -- --json   # keluaran JSON
-```
-
-### 2. Client
-
-```bash
-cd client
-npm install
-npm run dev             # Vite di http://localhost:5173
-```
-
-Vite memproxy `/api` dan `/uploads` ke `localhost:3001`, jadi jalankan server dan client bersamaan.
-
-Cara memakai: buka `/create` → isi **token admin** (nilai `ADMIN_TOKEN` di server) → buat album → salin **link kamera** ke tamu. Token admin hanya disimpan di browser panitia (`localStorage`), tidak pernah dikirim ke tamu.
-
-## Endpoint API
-
-Otorisasi: panitia memakai header `x-admin-token: <ADMIN_TOKEN>`, tamu memakai kunci album `?k=<uploadKey>` (atau header `x-upload-key`).
-
-| Method | Path | Akses | Deskripsi |
-| --- | --- | --- | --- |
-| GET | `/api/health` | publik | status penyimpanan (Drive/lokal), versi, batas |
-| POST | `/api/events` | admin | buat acara `{ name, type, preset, revealAt }` → menyertakan `uploadKey` |
-| GET | `/api/events` | admin | daftar acara + jumlah foto + kunci tamu |
-| GET | `/api/events/:slug` | publik (detail) / kunci tamu (`uploadKey`) | detail acara; `authorized` menunjukkan kunci tamu valid |
-| PATCH | `/api/events/:slug` | admin | ubah nama/preset, atau `{ "rotateUploadKey": true }` untuk mencabut link lama |
-| DELETE | `/api/events/:slug` | admin | hapus acara (folder Drive dipindah ke Trash) |
-| POST | `/api/events/:slug/photos` | kunci tamu | unggah foto — **biner mentah** (`content-type: image/jpeg`), bukan multipart |
-| GET | `/api/events/:slug/photos` | kunci tamu | daftar foto; `?since=<iso>` untuk hanya foto baru, `?refresh=1` untuk abaikan cache |
-| DELETE | `/api/events/:slug/photos/:photoId` | kunci tamu (≤ jendela Undo) / admin | hapus foto |
+| `ping` | publik | Handshake: `{ pong, version, actions[] }` |
+| `health` | publik | Mode `sheets+drive`, versi, jumlah baris tiap tab, batas unggah/foto/undo |
+| `login` | publik | `{ pin }` → `{ sid, admin, expiresAt, ttlSec }` |
+| `logout` | admin | Cabut sesi (tombstone di cache) |
+| `me` | admin | Data admin dari sesi |
+| `events` | admin | Daftar acara + jumlah foto + `joinKey` + `links` |
+| `createEvent` | admin | `{ nama, jenis, tanggal, lokasi, preset, revealAt }` → acara + `join_key` + `links` + template default |
+| `event` | publik / kunci tamu | Detail acara; `authorized` menandakan kunci tamu cocok. `joinKey` & `links` hanya bila berwenang |
+| `updateEvent` | admin | Ubah `nama`/`jenis`/`tanggal`/`lokasi`/`preset`/`revealAt`/`aktif`, atau `{ rotateUploadKey: true }` untuk mencabut link lama |
+| `deleteEvent` | admin | Hapus acara + folder Drive-nya (ke Trash) |
+| `uploadPhoto` | kunci tamu | `{ data: "<base64>", mime }` → foto ke Drive + baris `Photos`; balas `undoWindowMs` |
+| `photos` | kunci tamu | Daftar foto; `?since=<iso>` hanya yang baru, `?refresh=1` abaikan cache |
+| `deletePhoto` | kunci tamu (≤ jendela Undo) / admin | Hapus foto (Undo) |
+| `syncPhotos` | admin | `{ slug?, force? }` → tarik berkas Drive yang belum tercatat |
+| `template` | kunci tamu | Template undangan sebuah acara |
+| `saveTemplate` | admin | Simpan teks/warna/layout/musik undangan |
+| `createPrintOrder` | kunci tamu | `{ photoIds[], namaPemesan, kontak, alamat, catatan }` → daftar cetak |
+| `listPrintOrders` | admin | Daftar order + item + hitungan status |
+| `updatePrintOrderStatus` | admin | Ubah status order (`baru`/`diproses`/`selesai`/`dibatalkan`) |
+| `rsvp` | kunci tamu | Kirim/perbarui RSVP (upsert per kontak) + ringkasan kehadiran |
+| `listRsvp` | admin | Daftar RSVP + ringkasan |
+| `guestbook` | kunci tamu | Tanpa `pesan` = daftar ucapan; dengan `pesan` = tambah ucapan |
+| `deleteGuestbook` | admin | Hapus ucapan berdasarkan `entryId` |
 
 Contoh:
 
 ```bash
-# Buat album
-curl -X POST https://<api>/api/events \
-  -H "x-admin-token: $ADMIN_TOKEN" -H "content-type: application/json" \
-  -d '{"name":"Pernikahan Rina & Budi","type":"pernikahan","preset":"funsaver"}'
+API="https://script.google.com/macros/s/<DEPLOY_ID>/exec"
 
-# Unggah foto (biner mentah)
-curl -X POST "https://<api>/api/events/<slug>/photos" \
-  -H "content-type: image/jpeg" -H "x-upload-key: <uploadKey>" --data-binary @foto.jpg
+# Handshake & kesehatan
+curl -sL "$API?action=ping"
+curl -sL "$API?action=health"
+
+# Login admin → ambil token sesi
+SID=$(curl -sL -X POST "$API" -H 'content-type: text/plain' \
+  -d '{"action":"login","pin":"123456"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["sid"])')
+
+# Buat acara
+curl -sL -X POST "$API" -H 'content-type: text/plain' \
+  -d "{\"action\":\"createEvent\",\"sid\":\"$SID\",\"nama\":\"Pernikahan Rina & Budi\",\"jenis\":\"pernikahan\",\"preset\":\"funsaver\"}"
+
+# Unggah foto (base64) memakai kunci tamu
+curl -sL -X POST "$API" -H 'content-type: text/plain' \
+  -d "{\"action\":\"uploadPhoto\",\"slug\":\"pernikahan-rina-budi\",\"k\":\"<join_key>\",\"mime\":\"image/jpeg\",\"data\":\"$(base64 -w0 foto.jpg)\"}"
+
+# Daftar foto
+curl -sL "$API?action=photos&slug=pernikahan-rina-budi&k=<join_key>"
 ```
 
-Kode error penting: `401 invalid-key` (kunci tamu salah/kosong), `403 undo-expired` (lewat jendela Undo), `409 photo-limit` (album penuh), `413 too-large`, `415` (bukan JPEG/PNG/WebP), `429` (rate limit, lihat header `Retry-After`).
+Kode error yang dipakai di body: `bad-action`, `bad-json`, `bad-request`, `bad-table`, `no-session`, `bad-session`, `session-expired`, `session-revoked`, `admin-inactive`, `invalid-pin`, `weak-pin`, `invalid-key`, `rate-limited` (429), `event-not-found`, `event-inactive` (410), `not-found` (404), `undo-expired`, `not-in-event`, `photo-not-found`, `photo-limit` / `too-many-photos` (409), `too-large` (413), `unsupported` (415), `bad-photo-ids`, `order-not-found`, `missing-order-id`, `missing-event-id`, `bad-status`, `bad-music-url`, `text-too-long`, `drive-error` (502), `sheet-not-configured` / `sheet-open-failed` / `auth-not-configured` / `admin-not-configured` / `storage-unavailable` / `gas-busy` / `gas-quota` (503).
 
+## Model data (1 Spreadsheet, 8 tab)
 
-## Preset Film
+Header dibuat otomatis oleh `gas/Sheets.gs` (`ensureSchema_`); nama kolom tidak boleh diubah karena dipetakan langsung ke kunci JSON.
 
-| ID | Nama | Karakter |
+| Tab | Kolom |
+| --- | --- |
+| `Admin` | `admin_id`, `pin_hash` (SHA-256 + salt), `nama`, `role`, `aktif`, `dibuat_pada` |
+| `Events` | `event_id`, `slug`, `nama`, `jenis`, `tanggal`, `lokasi`, `join_key`, `drive_folder_id`, `preset`, `reveal_at`, `aktif`, `dibuat_pada` |
+| `Photos` | `photo_id` (= ID berkas Drive), `event_id`, `nama_file`, `url`, `thumb`, `ukuran`, `mime`, `sumber`, `diunggah_pada` |
+| `Templates` | `template_id`, `event_id`, `nama_template`, `tema_warna`, `teks_hero`, `teks_couple`, `teks_acara`, `teks_penutup`, `musik_url`, `tata_letak`, `diperbarui_pada` |
+| `PrintOrders` | `order_id`, `event_id`, `nama_pemesan`, `kontak`, `alamat`, `catatan`, `status`, `total_foto`, `dibuat_pada` |
+| `PrintItems` | `item_id`, `order_id`, `photo_id`, `url`, `jumlah`, `ukuran_cetak` |
+| `RSVP` | `rsvp_id`, `event_id`, `nama`, `kontak`, `hadir`, `jumlah_tamu`, `pesan`, `dibuat_pada`, `ip_hash` |
+| `Guestbook` | `entry_id`, `event_id`, `nama`, `pesan`, `dibuat_pada` |
+
+Struktur Drive: `Satu-Album/` (root; ID disimpan di property `DRIVE_ROOT_FOLDER_ID`) → `event-<slug>/` per acara. Berkas foto diberi nama `photo-<timestamp>-<acak>.<ext>`. Folder acara **tidak** dibagikan publik; hanya berkas fotonya (anyone with link) agar thumbnail Drive tampil di galeri.
+
+## Batas & default (Script Properties)
+
+Semua diatur di *Project Settings → Script properties*; default ada di `CONFIG_DEFAULTS` (`gas/Config.gs`).
+
+| Property | Default | Arti |
 | --- | --- | --- |
-| `funsaver` | Kodak FunSaver | hangat, jenuh, effortless |
-| `quicksnap` | Fujifilm QuickSnap | dingin, tajam di siang hari |
-| `portra400` | Kodak Portra 400 | lembut, warna kulit krem |
-| `ektar100` | Kodak Ektar 100 | warna mencolok, jenuh |
-| `hp5plus` | Ilford HP5 Plus | monokrom, grain tebal |
-| `cinestill800t` | CineStill 800T | tungsten + halation |
+| `SHEET_ID` | — (wajib) | ID Spreadsheet database |
+| `ADMIN_PIN` | — (wajib; seed `123456` bila kosong) | PIN awal admin, di-seed `initSheets`, lalu diganti dari panel admin |
+| `SESSION_SECRET` | — (wajib) | Kunci HMAC token sesi; harus panjang & acak |
+| `BASE_URL` | kosong | URL frontend (GitHub Pages) untuk membentuk link QR/undangan; kosong = link dibentuk relatif (mis. `/camera.html#slug?k=…`) |
+| `DRIVE_ROOT_FOLDER_NAME` | `Satu-Album` | Nama root folder Drive |
+| `DRIVE_ROOT_FOLDER_ID` | — (diisi otomatis) | Cache ID root folder |
+| `SESSION_TTL_SEC` | `28800` (8 jam) | Umur token sesi admin |
+| `LOGIN_MAX_ATTEMPTS` | `8` | Batas percobaan login per jam |
+| `MAX_PHOTOS_PER_EVENT` | `800` | Batas foto per acara (`photo-limit`) |
+| `MAX_UPLOAD_MB` | `8` | Batas ukuran satu berkas (`too-large`) |
+| `UNDO_WINDOW_MS` | `120000` (2 menit) | Jendela Undo hapus foto oleh tamu |
+| `CACHE_TTL_MS` | `10000` (10 detik) | Umur cache daftar foto/acara (maks. 6 jam) |
+| `IMAGE_WIDTH` / `THUMB_WIDTH` | `1600` / `400` | Lebar gambar & thumbnail pada URL Drive |
+| `RATE_UPLOAD_PER_HOUR` | `300` | Batas unggahan per jam per acara |
+| `RATE_CREATE_PER_HOUR` | `10` | Batas pembuatan acara per jam |
+| `ALLOWED_MIME` | `image/jpeg,image/png,image/webp` | Tipe gambar yang diterima |
 
-Grading diterapkan per-pixel: tone curve per kanal (LUT), color cast, vignette, grain seeded, dan light leak. Sumber di `client/src/filmPresets.ts`.
+Batas lain di dalam kode: dedupe order cetak 5 menit & 15 order/jam, maks. 50 foto per order, teks template maks. 2000 karakter, layout `klasik`/`elegan`/`floral`/`minimalis`/`modern`.
 
-## Alur
-
-1. Panitia membuka `/create`, mengisi token admin + nama acara + film → mendapat **link kamera** dan **link galeri** (berisi kunci album `?k=`).
-2. Tamu membuka link kamera, memotret dengan preset terpilih. Foto **langsung terunggah** (dikecilkan ke 2048 px di HP); ada tombol Undo 10 detik. Bila sinyal hilang, foto antre di perangkat dan terkirim otomatis.
-3. Foto muncul di galeri `/events/<slug>` — galeri menyegarkan dirinya sendiri tiap 20 detik.
-4. Server menyimpan `event.json` + foto ke Google Drive, jadi album tetap ada walau instance Render restart/tidur.
-
-## Test
+## Test & CI
 
 ```bash
-cd server && npm test     # 31 test: unit (slug/gambar/rate limit), backend Drive, dan API end-to-end
+# 1. Semua .gs bisa dikompilasi (lewat node:vm)
+node gas/test/syntax.mjs
+
+# 2. Tidak ada helper yang dipanggil tapi belum didefinisikan
+node gas/test/refs.mjs
+
+# 3. 36 test fungsional router (SpreadsheetApp/DriveApp/CacheService tiruan)
+node --test "gas/test/*.test.mjs"
 ```
 
-Test backend Drive memakai klien Drive palsu (`server/test/helpers/fake-drive.js`) sehingga **tidak butuh kredensial Google**. Termasuk uji “restart”: cache & klien dibuang, lalu galeri harus terbaca kembali dari `event.json` di Drive.
+Tidak butuh kredensial Google, tidak butuh `npm install`, tidak butuh `node_modules`. `gas/test/harness.mjs` menyediakan tiruan `SpreadsheetApp`, `DriveApp`, `CacheService`, `PropertiesService`, `Utilities`, `ScriptApp`, dan `UrlFetchApp`; berkas `gas/*.gs` dimuat dengan `vm` lalu `doGet`/`doPost` dipanggil seperti request sungguhan. Yang diuji: login/HMAC/sesi kedaluwarsa, CRUD acara, unggah foto (MIME, batas ukuran, batas album), cache & `since`, Undo, RSVP, buku tamu, template, order cetak, rate limit, dan JSONP.
 
-## Catatan
+CI (`.github/workflows/ci.yml`) menjalankan ketiga perintah tersebut di Node 22 untuk setiap push/PR ke `master`.
 
-- Kamera memerlukan HTTPS atau `localhost` (persyaratan `getUserMedia`).
-- Latar belakang gelap agar hasil terasa seperti cetakan foto.
-- Foto disimpan 2048 px / kualitas 0,85 (±0,3 MB) — cukup untuk cetak 4R, dan hemat kuota Drive.
-- Render free **tidur** setelah ±15 menit tanpa trafik: permintaan pertama bisa memakan ~1 menit, tapi data tetap aman karena dibaca ulang dari Drive.
-- Project dibangun khusus untuk skenario acara nikah: galeri berkembang seiring acara berlangsung.
+> **Catatan Node:** `node --test gas/test` (argumen folder) hanya jalan di Node ≥ 24; di Node 22 gagal `MODULE_NOT_FOUND`. Karena itu CI dan dokumentasi memakai glob `"gas/test/*.test.mjs"` yang jalan di kedua versi.
+
+## Dokumentasi
+
+| Berkas | Isi |
+| --- | --- |
+| `docs/CARA-MENJALANKAN.md` | Panduan praktis: setup Apps Script, deploy Web App, GitHub Pages, troubleshooting |
+| `docs/PRD.md` | Kebutuhan produk & lingkup fitur |
+| `docs/ARCHITECTURE.md` | Arsitektur, alur data, keputusan desain |
+| `docs/API.md` | Kontrak API (request/response, kode error) |
+| `docs/PERMISSIONS.md` | Peran & matriks izin |
+| `docs/BLOCKS.md`, `docs/THEMES.md` | Blok undangan & tema warna/tata letak |
+| `docs/DB-SCHEMA.sql`, `docs/ROADMAP.md` | Skema relasional & rencana jangka panjang |
+
+> Sebagian `docs/PRD.md`, `ARCHITECTURE.md`, `API.md`, dan `DB-SCHEMA.sql` masih menggambarkan **rencana lama** (Express + SQLite + React/Vite di `server/`, `client/`, `undangan/`) yang tidak dipakai. **Sumber kebenaran implementasi saat ini adalah `gas/`**; berkas-berkas itu disimpan sebagai spesifikasi produk jangka panjang.
+
+## Catatan & batasan
+
+- **Kamera butuh HTTPS** — `getUserMedia` tidak jalan di `file://` atau HTTP biasa; GitHub Pages sudah HTTPS.
+- **Foto dikirim base64** di body JSON (`text/plain`), jadi ±33% lebih besar dari berkas aslinya. Server **tidak** mengompresi; pengecilan dilakukan klien sebelum kirim, sedangkan `IMAGE_WIDTH`/`THUMB_WIDTH` hanya mengatur ukuran yang diminta dari Drive.
+- **HEIC/HEIF ditolak** (`415 unsupported`) — iPhone perlu mengirim JPEG.
+- **Semua respons HTTP 200**; klien harus membaca `ok`/`status` di body.
+- **Rate limit & cache non-atomik** (berbasis `CacheService`/`PropertiesService`) — cukup untuk satu acara, bukan pengganti infrastruktur server sungguhan.
+- **Kuota Google**: satu eksekusi Apps Script dibatasi ±6 menit, sehingga `syncPhotos` memproses bertahap dan mengembalikan `hasMore`; `syncAllDrivePhotos` mengulang maksimal 10 putaran per acara.
+- **Setiap perubahan kode harus di-deploy ulang** (Deploy → Manage deployments → Edit → Version: **New version**) agar `/exec` memakai kode terbaru.
+- **Auto-sync Drive opsional**: tanpa `installDriveSyncTrigger()`, unggahan lewat aplikasi Drive baru terlihat setelah `syncAllDrivePhotos()` dijalankan atau `action=syncPhotos`.
+- **Frontend `web/` belum ada**, sehingga `deploy-pages.yml` gagal dengan pesan jelas sampai `web/index.html` dibuat.
 

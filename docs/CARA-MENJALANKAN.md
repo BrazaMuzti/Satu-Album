@@ -1,551 +1,319 @@
 # Cara Menjalankan Satu-Album
 
-Panduan praktis menjalankan proyek ini di komputer sendiri: pasang, jalankan ketiga bagiannya, verifikasi hasilnya, sampai menyiapkan build produksi.
+Panduan praktis memasang **Satu-Album** dari nol sampai bisa dipakai tamu: Apps Script sebagai API + Google Sheets sebagai database + Google Drive sebagai penyimpanan foto + GitHub Pages sebagai frontend.
 
-> Semua perintah dan keluaran di dokumen ini **sudah diuji langsung di repo ini** (Linux, Node v26.11.1, npm 12.2.1, Python 3.14.8). Angka/JSON yang dikutip adalah keluaran nyata, bukan contoh karangan.
+Waktu pengerjaan ±20 menit dan tanpa biaya: hanya butuh akun Google dan browser. Tidak ada `npm install`, tidak ada server Node, tidak ada langkah build.
 
-Dokumen terkait: [README.md](../README.md) (ringkas) · [DEPLOYMENT.md](../DEPLOYMENT.md) (hosting online) · [ROADMAP.md](./ROADMAP.md) (fase berikutnya) · [API.md](./API.md) (kontrak endpoint).
+> Status saat ini: **backend (`gas/`) lengkap dan teruji**; frontend statis di folder `web/` **belum ada**. Anda tetap bisa menguji seluruh alur lewat `curl` (lihat langkah 7) sebelum halaman web ditulis.
 
 ## 0. Ringkasan cepat
 
-Repo ini berisi **tiga bagian yang dijalankan terpisah**. Tidak ada `package.json` di root, jadi setiap perintah dijalankan **dari dalam folder paketnya**.
+| # | Langkah | Di mana |
+| --- | --- | --- |
+| 1 | Buat Spreadsheet, salin ID-nya | [sheets.new](https://sheets.new) |
+| 2 | Buat project Apps Script, tempel 11 berkas `gas/*.gs` + `gas/appsscript.json` | [script.google.com](https://script.google.com) |
+| 3 | Isi Script Properties: `SHEET_ID`, `ADMIN_PIN`, `SESSION_SECRET` | Project Settings → Script properties |
+| 4 | Jalankan `initSheets` | Editor Apps Script (pilih fungsi → Run) |
+| 5 | Deploy **Web app** (Execute as: *Me*, Access: *Anyone*) → salin URL `/exec` | Deploy → New deployment |
+| 6 | Uji `?action=ping` dan `?action=health` | Browser / `curl` |
+| 7 | (Opsional) Salin URL `/exec` ke `API_BASE` di `web/assets/app.js`, unggah `web/` ke GitHub Pages | Repo → Settings → Pages |
 
-| # | Bagian | Folder | Cara jalankan | URL lokal |
-| --- | --- | --- | --- | --- |
-| 1 | API + penyimpanan foto | `server/` | `npm install` → `node --env-file-if-exists=.env index.js` | http://localhost:3001 |
-| 2 | Aplikasi kamera & galeri (SPA React) | `client/` | `npm install` → `npm run dev` | http://localhost:5173 |
-| 3 | Menu + undangan digital (statis) | `undangan/` | `python3 -m http.server 8090` | http://localhost:8090 |
+Perintah inti yang sering dipakai sesudahnya:
 
-Untuk mencoba fitur inti (memotret & melihat galeri): **jalankan #1 dan #2 di dua terminal**, lalu buka `http://localhost:5173`.
-
-```text
-Terminal 1: server  ← client memanggil /api & /uploads ke sini (proxy Vite)
-Terminal 2: client  ← browser Anda membuka ini
-Terminal 3: undangan (opsional, hanya HTML/CSS/JS statis)
-```
+| Perintah | Fungsi |
+| --- | --- |
+| `initSheets()` | Sekali saja: membuat 8 tab, admin pertama, root folder Drive |
+| `selfTest()` | Memastikan config, spreadsheet, skema, folder, dan cache sehat |
+| `showHealth()` | Ringkasan jumlah baris tiap tab + batas unggah |
+| `showEvents()` | Daftar acara + link kamera/galeri/undangan/RSVP |
+| `syncAllDrivePhotos()` | Menarik berkas Drive yang belum tercatat di tab `Photos` |
+| `installDriveSyncTrigger()` | Sinkronisasi Drive otomatis tiap 6 jam |
+| `setBaseUrl()` | Mengisi `BASE_URL` dari konstanta `SETUP_DEFAULT_BASE_URL` |
 
 ## 1. Prasyarat
 
-| Kebutuhan | Versi teruji | Catatan |
-| --- | --- | --- |
-| Node.js | v26.11.1 | Minimal Node 20.6 (agar flag `--env-file-if-exists` tersedia). Uji skema di §8 memakai modul `node:sqlite`; bila Node Anda menolaknya, tambahkan `--experimental-sqlite` atau pakai Node terbaru |
-| npm | 12.2.1 | Ikut Node |
-| Browser modern | Chrome/Edge/Firefox/Safari terbaru | Fitur kamera memakai `getUserMedia` + `canvas` |
-| Python 3 | 3.14.8 | Hanya untuk menyajikan folder `undangan/`. Alternatif: ekstensi *Live Server* VS Code atau `npx serve` |
-| Git | opsional | Hanya untuk menyimpan perubahan |
+- **Akun Google** yang punya Google Drive & Google Sheets (akun gratis sudah cukup).
+- **Browser modern** (Chrome/Edge/Safari/Firefox terbaru). Kamera membutuhkan **HTTPS**, jadi frontend tidak bisa diuji lewat `file://`.
+- **Akun GitHub** — hanya bila Anda ingin memakai GitHub Pages untuk frontend.
+- **Opsional, untuk menjalankan test lokal:** Node.js ≥ 20 (`node --version`); CI repo memakai **Node 22**. Test tidak butuh kredensial Google, jadi bisa dijalankan siapa pun tanpa akses ke spreadsheet Anda.
 
-Cek cepat:
+## 2. Peta repo
 
-```bash
-node -v     # v26.11.1
-npm -v      # 12.2.1
-python3 -V  # Python 3.14.8
+```
+Satu-Album/
+├── gas/                      # backend Apps Script — sumber kebenaran implementasi
+│   ├── Code.gs               # doGet/doPost + router action (API_ROUTES)
+│   ├── Config.gs             # semua setting dari Script Properties
+│   ├── Auth.gs               # PIN admin, token sesi HMAC, logout
+│   ├── Sheets.gs             # lapisan Google Sheets (SHEET_HEADERS)
+│   ├── DriveStore.gs         # folder & berkas foto, health, sinkronisasi
+│   ├── Events.gs             # CRUD acara, slug, join_key, link publik
+│   ├── Templates.gs          # template undangan
+│   ├── PrintOrders.gs        # daftar cetak
+│   ├── Interactions.gs       # RSVP & buku tamu
+│   ├── Lib.gs                # envelope respons, cache, rate limit, MIME
+│   ├── Setup.gs              # fungsi manual (initSheets, selfTest, trigger)
+│   ├── appsscript.json       # manifest: timezone, scope, mode web app
+│   └── test/                 # syntax.mjs, refs.mjs, api.test.mjs, harness.mjs
+├── .github/workflows/
+│   ├── ci.yml                # test otomatis (Node 22, tanpa npm)
+│   └── deploy-pages.yml      # deploy folder web/ ke GitHub Pages
+├── docs/                     # dokumentasi produk & teknis
+└── README.md
 ```
 
-Catatan versi lain: `server/` memakai ESM (`"type": "module"`) dan `googleapis@140`; `client/` memakai Vite 5 + React 18 + TypeScript 5.
+## 3. Siapkan database (Google Sheets)
 
-## 2. Peta repo: apa yang dijalankan
+1. Buka [sheets.new](https://sheets.new) → beri nama, mis. `Satu-Album DB`.
+2. Salin **ID** dari URL: `https://docs.google.com/spreadsheets/d/`**`<SHEET_ID>`**`/edit`.
+3. Tidak perlu mengubah apa pun secara manual: 8 tab + header dibuat oleh `initSheets`. Jangan mengganti nama tab/kolom, karena `gas/Sheets.gs` memetakan header langsung ke kunci JSON.
+4. Tidak perlu membagikan spreadsheet ke siapa pun — Apps Script mengaksesnya sebagai akun Anda.
 
-| Path | Isi | Dipakai saat |
-| --- | --- | --- |
-| `server/index.js` | Express API: `/api/health`, `/api/events`, `/api/events/:slug/photos`; menyajikan `/uploads` | Selalu (bagian #1) |
-| `server/store.js` | Penyimpanan JSON: `data/events.json`, `data/photos.json` | Selalu |
-| `server/drive.js` | Upload ke Google Drive (OAuth2 akun pribadi; service account = legacy) | Opsional |
-| `server/scripts/get-google-refresh-token.js` | Helper OAuth sekali pakai (`npm run token`) | Opsional |
-| `client/` | SPA: beranda, `/create`, `/events/:slug`, `/events/:slug/camera` | Bagian #2 |
-| `undangan/` | Menu utama (`index.html`) + undangan (`undangan.html`), CSS/JS statis | Bagian #3 |
-| `docs/` | Spesifikasi (PRD, arsitektur, skema DB, API, dll.) | Referensi, tidak dijalankan |
-| `server/data/*.json`, `server/uploads/` | Data nyata (di-*ignore* Git) | Dibuat otomatis saat dipakai |
+## 4. Pasang kode ke Apps Script
 
-## 3. Instalasi dependensi (sekali saja)
-
-```bash
-cd ~/Proyek/Satu-Album/server
-npm install          # express, cors, multer, nanoid, googleapis
-
-cd ../client
-npm install          # react, react-dom, react-router-dom + vite, typescript
-```
-
-`undangan/` **tidak butuh** instalasi apa pun (murni HTML/CSS/JS, memuat font & Font Awesome dari CDN).
-
-Kalau `node_modules/` sudah ada di kedua folder (seperti kondisi repo ini), Anda boleh langsung melompat ke langkah berikutnya. Untuk memasang ulang dari nol: `rm -rf server/node_modules client/node_modules` lalu ulangi perintah di atas.
-
-## 4. Menjalankan server API
-
-```bash
-cd ~/Proyek/Satu-Album/server
-cp ../.env.example .env            # hanya jika server/.env belum ada
-node --env-file-if-exists=.env index.js
-```
-
-Keluaran yang benar (terverifikasi):
-
-```text
-satualbum api on http://0.0.0.0:3001
-drive: nonaktif, foto disimpan lokal
-```
-
-Uji dari terminal lain:
-
-```bash
-curl -s http://localhost:3001/api/health
-# {"ok":true,"drive":false,"driveMode":"none","driveRootFolderId":null}
-```
-
-`storage.mode:"local"` (atau `drive.ready:false`) artinya foto akan disimpan lokal ke `server/uploads/` — kondisi normal untuk pemakaian lokal, tetapi **hilang saat restart di host gratis**.
-
-### ✅ `npm start` sudah membaca `.env`
-
-Sejak refactor Drive-as-truth, `server/package.json` memakai flag bawaan Node:
+1. Buka [script.google.com](https://script.google.com) → **New project** → ganti nama menjadi `Satu-Album API`.
+2. **Project Settings** (ikon gerigi) → centang **"Show `appsscript.json` manifest file in editor"**.
+3. Buka `appsscript.json` di editor, timpa seluruh isinya dengan isi `gas/appsscript.json`:
 
 ```json
-"start": "node --env-file-if-exists=.env index.js",
-"dev":   "node --env-file-if-exists=.env --watch index.js",
-"token": "node --env-file-if-exists=.env scripts/get-google-refresh-token.js",
-"sync":  "node --env-file-if-exists=.env scripts/sync-drive.mjs",
-"test":  "node --test test/"
+{
+  "timeZone": "Asia/Jakarta",
+  "dependencies": {},
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/script.scriptapp"
+  ],
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE_ANONYMOUS"
+  }
+}
 ```
 
-Jadi cukup `npm start` — tidak perlu `dotenv`, dan `server/.env` ikut terbaca. Konfigurasi dibaca terpusat di `server/src/config.js`; nilai yang tidak valid jatuh ke default dan masalah penting dicetak sebagai peringatan `[config] ...` saat boot (mis. Drive belum dikonfigurasi).
+`ANYONE_ANONYMOUS` penting: tamu tidak login Google, jadi mereka harus bisa memanggil `/exec` tanpa otorisasi.
 
-```bash
-npm start      # .env terbaca (butuh Node ≥ 20.12)
-npm run dev    # sama + auto-restart saat berkas berubah
-```
+4. Buat satu berkas skrip per berkas `.gs` berikut (ikon **+ → Script**, beri nama sama tanpa `.gs`), lalu tempel seluruh isinya:
 
-### Variabel lingkungan yang dikenali server
+   `Code`, `Config`, `Auth`, `Sheets`, `DriveStore`, `Events`, `Templates`, `PrintOrders`, `Interactions`, `Lib`, `Setup`.
 
-| Variabel | Default | Fungsi |
+   Urutan berkas tidak penting dan nama berkas hanya kosmetik — yang penting semua isinya ada di satu project.
+5. Simpan (**Ctrl/Cmd + S**).
+6. Opsional: ubah konstanta `SETUP_DEFAULT_BASE_URL` di `Setup.gs` bila URL GitHub Pages Anda berbeda dari `https://brazamuzti.github.io/Satu-Album`.
+
+## 5. Isi Script Properties
+
+**Project Settings → Script properties → Add script property**:
+
+| Property | Contoh nilai | Catatan |
 | --- | --- | --- |
-| `ADMIN_TOKEN` | *(kosong → endpoint acara balas 503)* | Token panitia (`x-admin-token`) untuk membuat/mengubah/menghapus acara. **Wajib di produksi.** |
-| `PORT` | `3001` | Port HTTP (`0` = pilih port bebas; Render menyuntikkannya sendiri) |
-| `HOST` | `0.0.0.0` | Bind address (dibutuhkan host cloud) |
-| `PUBLIC_BASE_URL` | *(kosong)* | Awalan absolut URL foto lokal |
-| `ALLOWED_ORIGIN` | *(kosong = semua diizinkan)* | Allowlist CORS, pisahkan dengan koma |
-| `DATA_DIR` | `data` | Folder `events.json` & `photos.json` (hanya dipakai mode lokal) |
-| `UPLOAD_DIR` (atau `LOCAL_UPLOAD_DIR`) | `uploads` | Folder foto fallback lokal |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` | *(kosong)* | Aktifkan mode Drive sebagai sumber kebenaran (lihat §7). Tanpa ini server jatuh ke mode lokal |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | `credentials/google-service-account.json` | Legacy; jangan dipakai (kuota storage 0 byte) |
-| `GOOGLE_DRIVE_ROOT_FOLDER_NAME` / `_ROOT_FOLDER_ID` | `Satu-Album` / kosong | Folder tujuan di Drive |
-| `GOOGLE_DRIVE_IMAGE_WIDTH` / `_THUMB_WIDTH` | `1600` / `400` | Ukuran gambar dari endpoint thumbnail Drive |
-| `MAX_UPLOAD_MB` | `8` | Batas ukuran satu foto (server mengembalikan `413` bila lewat) |
-| `MAX_PHOTOS_PER_EVENT` | `800` | Batas foto per album (`409 photo-limit`) |
-| `RATE_CREATE_PER_HOUR` / `RATE_UPLOAD_PER_HOUR` | `10` / `300` | Rate limit per IP (`429` + `Retry-After`) |
-| `SA_UNDO_WINDOW_MS` | `120000` | Jendela Undo tamu (tombol Undo di UI tampil 10 detik) |
-| `SA_CACHE_TTL_MS` | `10000` | Umur cache daftar acara/foto (penjaga kuota Drive API) |
-| `SA_META_FLUSH_MS` | `3000` | Debounce penulisan `event.json` (jumlah foto) |
+| `SHEET_ID` | `1AbC...xyz` | ID spreadsheet dari langkah 3 (wajib) |
+| `ADMIN_PIN` | `776655` | PIN login admin. Bila dikosongkan, `initSheets` memakai PIN sementara **`123456`** dan memperingatkan Anda |
+| `SESSION_SECRET` | hasil `openssl rand -hex 32` | Kunci HMAC token sesi. Wajib ada, jangan dibagikan. Mengubahnya = semua sesi lama langsung tidak valid |
 
-### Di mana data disimpan?
+Nilai opsional (mis. `BASE_URL`, `MAX_UPLOAD_MB`) tidak perlu diisi karena punya default aman — daftar lengkapnya ada di README → *Batas & default*.
 
-| Mode | Metadata album | Foto | Sifat |
-| --- | --- | --- | --- |
-| **Drive** (produksi) | `<root>/event-<slug>/event.json` | `<root>/event-<slug>/photo-*.jpg` | **Awet** — bertahan setelah restart/redeploy Render |
-| Lokal (dev) | `server/data/events.json` | `server/uploads/photo-*.jpg` | *Ephemeral* di host gratis; aman untuk eksperimen lokal |
+## 6. Jalankan `initSheets`
 
-Server memilih mode otomatis dari ada/tidaknya kredensial Google, lalu mencetak salah satu baris ini saat boot:
+1. Di editor, pilih fungsi **`initSheets`** → **Run**.
+2. Saat pertama kali, Google meminta otorisasi: **Review permissions → pilih akun → Advanced → Go to Satu-Album API (unsafe)** → **Allow**. Peringatan "unsafe" normal untuk project pribadi yang belum diverifikasi.
+3. Buka **Execution log**. Hasil yang diharapkan:
 
 ```
-penyimpanan: drive (Google Drive = sumber kebenaran)
-penyimpanan: local (disk lokal — HILANG saat restart!)
+Spreadsheet: Satu-Album DB (1AbC...xyz)
+Tab dibuat: Admin, Events, Photos, Templates, PrintOrders, PrintItems, RSVP, Guestbook
+Admin: adm_xxxxxxxxxxxx (Admin Utama)
+Root folder Drive: Satu-Album (1YzZ...)
+BASE_URL kosong -> link QR memakai default https://brazamuzti.github.io/Satu-Album. Jalankan setBaseUrl() bila domain berbeda.
+SELESAI. Langkah berikutnya:
+1. Deploy > New deployment > Web app (Execute as: Me, Access: Anyone).
+2. Salin URL /exec ke konstanta API_BASE di web/assets/app.js.
+3. Upload web/ ke GitHub Pages.
 ```
 
-Folder `data/`, `uploads/`, dan `.env` di-*ignore* Git. **Untuk uji coba terisolasi** (tanpa mengganggu data asli), arahkan ke `/tmp`:
+4. Jalankan **`selfTest`** — semua baris harus `OK` (tidak boleh ada `FAIL`).
+5. Jalankan **`setBaseUrl()`** bila URL frontend Anda bukan default di atas.
+
+## 7. Deploy Web App
+
+1. **Deploy → New deployment**.
+2. Klik ikon gerigi **Select type → Web app**.
+3. Isi:
+   - **Description**: `v1` (bebas)
+   - **Execute as**: **Me** — agar Apps Script memakai izin Anda saat membaca Sheets & Drive
+   - **Who has access**: **Anyone** — tamu tanpa akun Google harus bisa memanggil `?action=...`
+4. **Deploy** → **Authorize access** → pilih akun → **Allow**.
+5. Salin **Web app URL**, bentuknya:
+
+```
+https://script.google.com/macros/s/AKfycb.../exec
+```
+
+6. Uji di browser:
+
+```
+<URL>/exec?action=ping     → {"ok":true,"data":{"pong":true,"version":"3.0.0-sheets","actions":[...]}}
+<URL>/exec?action=health   → mode "sheets+drive", counts 8 tab, "ready": true
+```
+
+`ready: true` berarti `SHEET_ID` + `SESSION_SECRET` sudah terisi dan tidak ada error saat membaca spreadsheet.
+
+> **Penting:** URL deployment menunjuk ke *snapshot* versi kode. Setiap kali Anda mengubah kode di editor, buka **Deploy → Manage deployments → ikon pensil (Edit) → Version: New version → Deploy**. Tanpa itu, `/exec` masih menjalankan kode lama.
+
+### Uji alur lengkap tanpa frontend
+
+Simpan URL deployment di variabel, lalu jalankan (butuh `curl` dan `python3`):
 
 ```bash
-cd ~/Proyek/Satu-Album/server
-DATA_DIR=/tmp/sa-demo/data UPLOAD_DIR=/tmp/sa-demo/uploads PORT=3999 \
-  npm start
+API="https://script.google.com/macros/s/<DEPLOY_ID>/exec"
+
+# 1. Login admin → token sesi
+SID=$(curl -sL -X POST "$API" -H 'content-type: text/plain' \
+  -d '{"action":"login","pin":"776655"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["sid"])')
+
+# 2. Buat acara → perhatikan slug, joinKey, dan links
+curl -sL -X POST "$API" -H 'content-type: text/plain' \
+  -d "{\"action\":\"createEvent\",\"sid\":\"$SID\",\"nama\":\"Pernikahan Rina & Budi\",\"jenis\":\"pernikahan\"}"
+
+# 3. Unggah satu foto (kecil saja saat uji, mis. hasil `curl` PNG 1x1)
+curl -sL -X POST "$API" -H 'content-type: text/plain' \
+  -d "{\"action\":\"uploadPhoto\",\"slug\":\"pernikahan-rina-budi\",\"k\":\"<joinKey>\",\"mime\":\"image/png\",\"data\":\"$(base64 -w0 uji.png)\"}"
+
+# 4. Lihat galeri & jumlah foto
+curl -sL "$API?action=photos&slug=pernikahan-rina-budi&k=<joinKey>"
 ```
 
+Body JSON dikirim sebagai `content-type: text/plain` dengan sengaja: Apps Script tidak punya `doOptions`, sehingga `application/json` akan memicu preflight `OPTIONS` dan diblokir browser.
 
-Contoh alur lengkap yang terverifikasi (buat album → unggah foto → daftar foto) — memperhatikan otorisasi baru:
+## 8. Frontend di GitHub Pages (`web/`)
+
+Backend sudah membentuk link publik dengan pola hash (tanpa routing server):
+
+```
+<BASE_URL>/camera.html#<slug>?k=<join_key>     ← kamera sekali pakai (QR)
+<BASE_URL>/galeri.html#<slug>?k=<join_key>     ← galeri bersama
+<BASE_URL>/undangan.html#<slug>?k=<join_key>   ← undangan digital
+<BASE_URL>/rsvp.html#<slug>?k=<join_key>       ← konfirmasi kehadiran
+```
+
+Halaman admin (daftar acara, QR, template, daftar cetak) tidak dibentuk backend — beri nama bebas, mis. `admin.html`, dan simpan token `sid` di `sessionStorage`.
+
+Bila Anda menulis frontend sendiri:
+
+1. Buat folder `web/` di repo berisi `index.html` (wajib), `admin.html`, `camera.html`, `galeri.html`, `undangan.html`, `rsvp.html`, dan `assets/`.
+2. Isi konstanta `API_BASE` di `web/assets/app.js` (atau di mana pun Anda menyimpannya) dengan URL `/exec` dari langkah 7.
+3. Selalu panggil API dengan `fetch(API_BASE, { method: "POST", headers: { "content-type": "text/plain" }, body: JSON.stringify({...}) })` dan baca `ok`/`status` dari body — bukan dari status HTTP.
+4. Di repo GitHub: **Settings → Pages → Source: GitHub Actions** (Pages gratis hanya untuk repo publik).
+5. Commit ke branch `master`/`main` dengan perubahan di `web/**` → workflow `.github/workflows/deploy-pages.yml` mengunggah folder `web/` ke Pages.
+
+Tanpa frontend pun, seluruh data bisa diperiksa langsung di spreadsheet dan folder Drive.
+
+## 9. Menggunakan aplikasi
+
+**Alur admin**
+
+1. Login dengan PIN → simpan token sesi di `sessionStorage`.
+2. Buat acara: isi nama (wajib, maks. 120 karakter), jenis, tanggal, lokasi, `preset`, dan `revealAt` bila foto baru boleh tampil setelah waktu tertentu. Sistem otomatis membuat slug unik, `join_key` 32 hex, folder Drive `event-<slug>/`, dan template undangan default.
+3. Bagikan **link kamera** (QR) ke tamu; simpan tautan galeri/undangan/RSVP.
+4. Pantau foto di tab `Photos`, daftar cetak di `PrintOrders`/`PrintItems`, RSVP di tab `RSVP`, ucapan di `Guestbook`.
+5. Cabut akses kapan pun: `updateEvent` dengan `{"rotateUploadKey": true}` membuat `join_key` baru (link lama langsung tidak valid), atau set `aktif = FALSE` untuk menutup acara (`event-inactive`).
+6. Ubah template undangan lewat `saveTemplate` (tema warna, teks hero/couple/acara/penutup, musik, layout).
+
+**Alur tamu**
+
+1. Buka link kamera → ambil foto (atau pilih dari galeri ponsel) → foto dikecilkan di klien lalu dikirim base64.
+2. Tamu bisa membatalkan foto terakhir selama **2 menit** (`undoWindowMs`).
+3. Buka galeri untuk melihat semua foto; kirim RSVP dan ucapan dari halaman undangan.
+
+**Mengambil hasil acara**
+
+- Foto asli: Google Drive → `Satu-Album/event-<slug>/` → *Download* (folder tetap privat untuk Anda).
+- Daftar/data: buka spreadsheet → **File → Download → Excel/CSV** untuk tab `Photos`, `RSVP`, `Guestbook`, `PrintOrders`.
+- Unduhan manual ke Drive (unggah lewat aplikasi Drive) bisa masuk album dengan `syncAllDrivePhotos()` atau `action=syncPhotos`.
+
+## 10. Menjalankan test lokal & di CI
+
+Dari akar repo:
 
 ```bash
-ADMIN=demo-admin-token   # samakan dengan ADMIN_TOKEN di server/.env
-
-curl -s -X POST http://localhost:3999/api/events \
-  -H "x-admin-token: $ADMIN" -H 'content-type: application/json' \
-  -d '{"name":"Demo Tutorial","type":"pernikahan","preset":"portra400","revealAt":null}'
-# {"event":{"id":"evt_...","slug":"demo-tutorial","name":"Demo Tutorial",...,"uploadKey":"<32 karakter>"}}
-
-KEY=<uploadKey dari respons di atas>
-
-# Unggah foto sebagai biner mentah (bukan multipart)
-curl -s -X POST "http://localhost:3999/api/events/demo-tutorial/photos" \
-  -H 'content-type: image/jpeg' -H "x-upload-key: $KEY" \
-  --data-binary @server/uploads/photo-1792355230619-39083.jpg
-# {"photo":{"id":"1AbC...","eventSlug":"demo-tutorial","url":"/uploads/photo-1792615870356-3144.jpg","source":"local"},
-#  "undoWindowMs":120000,"serverTime":"..."}
-
-# Daftar foto (butuh kunci tamu)
-curl -s "http://localhost:3999/api/events/demo-tutorial/photos?k=$KEY"
-# {"photos":[...],"count":1,"stale":false}
-
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3999/api/events/tidak-ada        # 404
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3999/api/events/demo-tutorial/photos   # 401 (tanpa kunci)
+node gas/test/syntax.mjs            # semua .gs bisa dikompilasi
+node gas/test/refs.mjs              # tidak ada fungsi dipanggil tapi tidak didefinisikan
+node --test "gas/test/*.test.mjs"   # 36 test fungsional router
 ```
 
-Di UI, panitia tidak perlu `curl`: buka `/create`, isi token admin di kolom pertama, buat album, lalu salin **link kamera** yang muncul (link sudah membawa `?k=<uploadKey>`).
-```
+Tes berjalan tanpa kredensial Google: `gas/test/harness.mjs` menyediakan tiruan `SpreadsheetApp`, `DriveApp`, `CacheService`, `PropertiesService`, `Utilities`, `ScriptApp`, dan `UrlFetchApp`; seluruh `gas/*.gs` dimuat dengan `vm`, lalu `doGet`/`doPost` dipanggil seperti request asli.
 
-Perhatikan `"url":"/uploads/..."` — URL **relatif** karena `PUBLIC_BASE_URL` kosong. Itu benar untuk dev (proxy Vite meneruskan `/uploads` ke server). Untuk produksi lintas domain, isi `PUBLIC_BASE_URL` (lihat §12).
+> **Catatan Node:** bentuk `node --test gas/test` (argumen folder) hanya bekerja di Node ≥ 24; di Node 22 muncul `MODULE_NOT_FOUND`. Selalu pakai glob `"gas/test/*.test.mjs"` — itu yang dipakai CI (`.github/workflows/ci.yml`, Node 22) dan berjalan di Node 22 maupun 26.
 
-## 5. Menjalankan aplikasi kamera & galeri (client)
+CI berjalan untuk setiap push/PR ke `master`; workflow `deploy-pages.yml` hanya berjalan bila ada perubahan di `web/**` atau dipicu manual, dan sengaja gagal cepat dengan pesan jelas selama `web/index.html` belum ada.
 
-Buka **terminal kedua** (biarkan server tetap jalan):
-
-```bash
-cd ~/Proyek/Satu-Album/client
-npm run dev
-```
-
-Keluaran yang benar (terverifikasi):
-
-```text
-  VITE v5.4.21  ready in 142 ms
-
-  ➜  Local:   http://localhost:5173/
-  ➜  Network: use --host to expose
-```
-
-Buka **http://localhost:5173** di browser.
-
-### Rute yang tersedia
-
-| Rute | Halaman | Fungsi |
-| --- | --- | --- |
-| `/` | Beranda | Tombol "Buat album →" |
-| `/create` | Form pembuatan | Nama acara, jenis, preset film, `revealAt` → dapat `slug` |
-| `/events/:slug/camera` | Kamera live | `getUserMedia` + render 6 preset film di `canvas`, lalu unggah |
-| `/events/:slug` | Galeri | Menampilkan semua foto acara tersebut |
-
-### Bagaimana client terhubung ke server
-
-`client/vite.config.ts` sudah mem-*proxy* dua path ke `localhost:3001`:
-
-```text
-/api     → http://localhost:3001   (data acara & foto)
-/uploads → http://localhost:3001   (berkas foto lokal)
-```
-
-Karena itu, **selama pakai `npm run dev` Anda tidak perlu mengatur `VITE_API_BASE`**. Kalau server belum jalan, konsol Vite menampilkan galat seperti ini (terlihat saat pengujian, dan berarti proxy bekerja namun targetnya mati):
-
-```text
-[vite] http proxy error: /api/health
-AggregateError [ECONNREFUSED]
-```
-
-### Uji manual 60 detik
-
-1. Pastikan Terminal 1 (server) sudah jalan dan `curl http://localhost:3001/api/health` mengembalikan `{"ok":true,...}`.
-2. Buka `http://localhost:5173` → klik **Buat album →**.
-3. Isi nama (mis. `Pernikahan Ani & Budi`), pilih jenis & preset film → **Create**. Anda akan diarahkan ke halaman dengan `slug` (mis. `pernikahan-ani-budi`).
-4. Buka `/events/<slug>/camera`, izinkan akses kamera, ambil beberapa foto.
-5. Foto akan tersimpan di `server/uploads/` (mode lokal) dan muncul di `/events/<slug>`.
-
-Verifikasi dari sisi server:
-
-```bash
-curl -s http://localhost:3001/api/events/pernikahan-ani-budi/photos
-# {"photos":[{"id":"...","eventSlug":"pernikahan-ani-budi","url":"/uploads/photo-...jpg","source":"local",...}]}
-```
-
-### 📷 Syarat kamera (sering bikin bingung)
-
-- `getUserMedia` hanya berjalan di **`http://localhost`** atau **HTTPS**. Membuka dev server lewat `http://192.168.x.x:5173` akan **memblokir kamera** (bukan *secure context*), walau galeri tetap bisa dilihat.
-- Bila muncul `NotAllowedError`, izinkan kamera di ikon 🔒 pada address bar → *Site settings* → **Camera: Allow**, lalu muat ulang.
-- Bila `NotFoundError`/tidak ada perangkat kamera (PC tanpa webcam), uji dari ponsel melalui HTTPS, misal dengan tunnel: `npx cloudflared tunnel --url http://localhost:5173` (atau `ngrok http 5173`), lalu buka URL HTTPS yang diberikan dari ponsel.
-- Untuk membuka dari perangkat lain di jaringan lokal (hanya untuk melihat galeri): `npm run dev -- --host`.
-
-### Build produksi & pratinjau lokal
-
-```bash
-cd ~/Proyek/Satu-Album/client
-npm run build     # tsc -b && vite build  → folder dist/
-npm run preview   # menyajikan dist/ secara lokal
-```
-
-Keluaran nyata saat pengujian (`npm run build`, exit code 0):
-
-```text
-✓ 40 modules transformed.
-dist/index.html                   0.92 kB │ gzip:  0.55 kB
-dist/assets/index-CA9e6GFe.css    4.58 kB │ gzip:  1.48 kB
-dist/assets/index-DQCgFT4X.js   173.65 kB │ gzip: 57.65 kB
-✓ built in 645ms
-```
-
-`client/public/404.html` otomatis tersalin ke `dist/404.html` (dipakai GitHub Pages untuk *deep-link* `/events/<slug>`).
-
-Dua variabel build yang penting:
-
-```bash
-# API di host lain (mis. Render) — dipakai saat SPA tidak di-proxy
-VITE_API_BASE=https://satu-album-api.onrender.com npm run build
-
-# GitHub Pages *project site* (https://<user>.github.io/Satu-Album/)
-VITE_BASE=/Satu-Album/ VITE_API_BASE=https://satu-album-api.onrender.com npm run build
-```
-
-## 6. Menjalankan menu & undangan digital (statis)
-
-Bagian ini tidak butuh Node maupun `npm install` — cukup server berkas statis:
-
-```bash
-cd ~/Proyek/Satu-Album/undangan
-python3 -m http.server 8090
-```
-
-Lalu buka di browser (keduanya terverifikasi mengembalikan HTTP 200):
-
-| URL | Isi |
-| --- | --- |
-| http://localhost:8090/index.html | **Menu Utama** — 8 kartu (Camera/Scan QR, Galeri, Undangan, RSVP, Buku Tamu, Amplop, Pengaturan Tema & Musik, Admin) dengan modal aksi |
-| http://localhost:8090/undangan.html | Undangan lengkap: cover "Buka Undangan", countdown, jadwal, galeri, amplop digital, RSVP, buku tamu, penutup |
-| http://localhost:8090/undangan.html?to=Bapak%20Andi | Sama, tetapi nama tamu otomatis terisi di form RSVP + muncul sapaan "Dear Bapak Andi" |
-
-Alternatif tanpa Python: ekstensi **Live Server** (VS Code) → klik kanan `index.html` → *Open with Live Server*.
-
-### Apa yang jalan & apa yang belum
-
-| Fitur | Status sekarang | Catatan |
-| --- | --- | --- |
-| Cover "Buka Undangan", scroll reveal, countdown, tombol musik, tambah ke kalender (`.ics`), salin nomor rekening | ✅ jalan | Murni JS/CSS (`js/invitation.js`) |
-| Nama tamu via `?to=` | ✅ jalan | Terisi otomatis bila server dijalankan (bukan `file://`) |
-| Musik latar | ⚠️ belum | `undangan/assets/music/musik.mp3` masih **0 byte** — ganti dengan MP3 asli |
-| RSVP & Buku Tamu | ⚠️ target GAS belum diisi | `js/main.js` masih `GAS_URL = "MASUKKAN_URL_GAS_ANDA_DI_SINI"`. Bila gagal, halaman sengaja menampilkan "RSVP terkirim (mode offline)" agar tamu tidak bingung |
-| Kartu "Camera / Scan QR" & "Galeri" di Menu Utama | ⚠️ masih placeholder | Klik-nya memunculkan dialog "integrasi client app" — integrasi ke SPA dijadwalkan pada fase berikutnya ([ROADMAP.md](./ROADMAP.md)) |
-| Font & ikon | ✅ via CDN | Butuh internet (Google Fonts + Font Awesome 6) |
-
-Kalau ingin RSVP/buku tamu benar-benar mengirim data **sekarang**, isi `GAS_URL` di `undangan/js/main.js` dengan URL Google Apps Script milik Anda (pola yang sama seperti proyek undangan sebelumnya). Untuk ke depannya, [API.md](./API.md) Fase 2 menggantikan GAS dengan endpoint `POST /api/v1/public/:slug/rsvp` di server sendiri.
-
-> Tips: buka `index.html` langsung dengan `file://` juga bisa untuk sekilas melihat tampilan, tetapi clipboard (salin rekening) dan audio lebih andal lewat `http://localhost`.
-
-## 7. Mengaktifkan Google Drive (opsional)
-
-Tanpa kredensial, foto disimpan ke `server/uploads/` (`driveMode:"none"` — kondisi repo saat ini). Untuk menyimpan ke Drive akun Anda sendiri:
-
-1. Google Cloud Console → aktifkan **Google Drive API**.
-2. **OAuth consent screen**: User type *External*, tambahkan scope `https://www.googleapis.com/auth/drive.file`, lalu **Publish app → In production**.
-3. **Credentials → Create credentials → OAuth client ID → Desktop app** → salin Client ID & Secret.
-4. Ambil refresh token (butuh browser untuk login sekali):
-
-   ```bash
-   cd ~/Proyek/Satu-Album/server
-   GOOGLE_CLIENT_ID=xxx GOOGLE_CLIENT_SECRET=yyy npm run token
-   ```
-
-   Helper akan mencetak URL, membuka callback di `http://localhost:53682`, lalu mencetak `GOOGLE_REFRESH_TOKEN=...`. Kalau port callback bermasalah: `npm run token -- --manual` (salin-tempel kode).
-5. Isi ketiga nilai tersebut di `server/.env`, lalu **jalankan server dengan `--env-file-if-exists`** (ingat §4) dan cek:
-
-   ```bash
-   curl -s http://localhost:3001/api/health
-   # {"ok":true,"drive":true,"driveMode":"oauth",...}
-   ```
-
-Cek perilaku helper tanpa kredensial (terverifikasi, keluar dengan kode 1 — aman, tidak menggantung):
-
-```text
-GOOGLE_CLIENT_ID dan GOOGLE_CLIENT_SECRET wajib diisi.
-Contoh: GOOGLE_CLIENT_ID=xxx GOOGLE_CLIENT_SECRET=yyy node scripts/get-google-refresh-token.js
-```
-
-⚠️ Catatan penting:
-
-- `server/.env` saat ini masih memuat baris legacy `GOOGLE_SERVICE_ACCOUNT_FILE=credentials/google-service-account.json`; folder `server/credentials/` belum ada, jadi mode Drive tetap `none` (terverifikasi). Biarkan atau hapus barisnya.
-- **Jangan** pakai service account: kuotanya 0 byte → `storageQuotaExceeded`. Pakai OAuth2 akun pribadi.
-- Jangan membuat folder tujuan manual di web Drive; scope `drive.file` hanya melihat berkas buatan app, sehingga server membuat folder `Satu-Album` sendiri.
-- Selama consent masih *Testing*, refresh token kedaluwarsa dalam **7 hari** (`invalid_grant`).
-
-## 8. Memverifikasi skema database (tanpa menyentuh data asli)
-
-`docs/DB-SCHEMA.sql` **belum dipakai** oleh aplikasi (pemakaiannya dimulai Fase 0–1 di [ROADMAP.md](./ROADMAP.md)). Anda tetap bisa mengujinya sekarang dengan `node:sqlite` bawaan Node — di database **in-memory**, sehingga tidak ada berkas yang dibuat. Bila modul itu belum tersedia di Node Anda (mis. Node 20), jalankan perintahnya dengan `node --experimental-sqlite`.
-
-Simpan berkas berikut sebagai `/tmp/cek-skema.mjs`:
-
-```js
-/* cek-skema.mjs — menguji docs/DB-SCHEMA.sql di database sementara.
-   Argumen:  [berkas-sql] [berkas-db]   (default: docs/DB-SCHEMA.sql, ":memory:") */
-import fs from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-
-const file = process.argv[2] || "docs/DB-SCHEMA.sql";
-const dbfile = process.argv[3] || ":memory:";
-const sql = fs.readFileSync(file, "utf8");
-const db = new DatabaseSync(dbfile);
-
-db.exec(sql);
-const t = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
-const v = db.prepare("SELECT name FROM sqlite_master WHERE type='view'").all();
-console.log(`OK: ${t.length} tabel, ${v.length} view  (db: ${dbfile})`);
-
-db.exec(sql);
-console.log("OK: idempoten (aman dijalankan dua kali)");
-
-const fk = db.prepare("PRAGMA foreign_keys").get();
-console.log("foreign_keys pragma:", JSON.stringify(fk));
-db.close();
-```
-
-Jalankan dari **root repo**:
-
-```bash
-cd ~/Proyek/Satu-Album
-node /tmp/cek-skema.mjs docs/DB-SCHEMA.sql
-```
-
-Keluaran nyata (terverifikasi):
-
-```text
-OK: 35 tabel, 1 view  (db: :memory:)
-OK: idempoten (aman dijalankan dua kali)
-foreign_keys pragma: {"foreign_keys":1}
-```
-
-Ingin membuat **berkas** DB nyata untuk eksperimen (mis. membuka dengan `sqlite3`)? Beri argumen kedua berupa path di `/tmp` — jangan di `server/data/`:
-
-```bash
-node /tmp/cek-skema.mjs docs/DB-SCHEMA.sql /tmp/sa-coba.db   # terverifikasi, 35 tabel
-sqlite3 /tmp/sa-coba.db '.tables'                            # opsional, jika sqlite3 terpasang
-rm -f /tmp/sa-coba.db*                                       # bersihkan bila sudah selesai
-```
-
-Skrip aman dijalankan berulang pada berkas yang sama (`CREATE ... IF NOT EXISTS` + migrasi bernomor), yang sudah diuji lintas proses tanpa galat.
-
-## 9. Ringkasan port, perintah, dan variabel
-
-**Port**
-
-| Port | Dipakai oleh | Bisa diubah via |
-| --- | --- | --- |
-| `3001` | Server API | `PORT` |
-| `5173` | Vite dev server (client) | `client/vite.config.ts` → `server.port` |
-| `8090` | Server statis `undangan/` (contoh) | argumen `python3 -m http.server <port>` |
-| `53682` | Callback OAuth saat `npm run token` | `OAUTH_PORT` |
-
-**Perintah harian**
-
-| Perintah | Dijalankan di | Kegunaan |
-| --- | --- | --- |
-| `node --env-file-if-exists=.env index.js` | `server/` | Menjalankan API **dengan** `.env` (disarankan) |
-| `npm start` | `server/` | Menjalankan API tanpa membaca `.env` |
-| `npm run dev` | `server/` | Sama seperti `npm start` + auto-restart saat berkas berubah |
-| `npm run token` | `server/` | Mengambil `GOOGLE_REFRESH_TOKEN` (butuh kredensial OAuth) |
-| `npm run dev` | `client/` | Vite dev server + HMR |
-| `npm run build` | `client/` | Type-check (`tsc`) + build produksi ke `dist/` |
-| `npm run preview` | `client/` | Menyajikan `dist/` untuk uji akhir |
-| `python3 -m http.server 8090` | `undangan/` | Menyajikan undangan & menu statis |
-| `node /tmp/cek-skema.mjs docs/DB-SCHEMA.sql` | root repo | Menguji skema DB di in-memory |
-
-**Variabel lingkungan server**
-
-| Variabel | Perlu sekarang? | Untuk apa |
-| --- | --- | --- |
-| `PORT`, `HOST` | opsional | Port & bind address |
-| `PUBLIC_BASE_URL` | produksi | Membuat URL foto lokal menjadi absolut |
-| `ALLOWED_ORIGIN` | produksi | Allowlist CORS untuk domain client |
-| `DATA_DIR`, `UPLOAD_DIR` | opsional | Lokasi data JSON & foto |
-| `GOOGLE_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` | opsional | Mode Drive OAuth2 |
-| `SA_DB_PATH`, `SA_GUEST_SECRET`, `SA_SESSION_DAYS`, `SA_BACKUP_*` | **belum ada** | Akan diperkenalkan pada Fase 0 ([ARCHITECTURE.md](./ARCHITECTURE.md) §9). Mengisinya sekarang tidak berpengaruh |
-
-**Variabel build client**
-
-| Variabel | Fungsi |
-| --- | --- |
-| `VITE_API_BASE` | Basis URL API saat SPA tidak memakai proxy Vite (mis. di Vercel) |
-| `VITE_BASE` | Base path aset & router (khusus GitHub Pages *project site*) |
-
-## 10. Troubleshooting (gejala → sebab → solusi)
+## 11. Troubleshooting
 
 | Gejala | Sebab | Solusi |
 | --- | --- | --- |
-| `ECONNREFUSED` / HTTP 500 di konsol Vite saat memanggil `/api/...` | Server API belum jalan (proxy aktif, target mati — persis yang terlihat saat pengujian) | Jalankan Terminal 1 (§4) lebih dulu |
-| `Error: listen EADDRINUSE: address already in use :::3001` | Port 3001 dipakai proses lain | `fuser -k 3001/tcp` **atau** jalankan server di port lain: `PORT=3002 node index.js` **dan** ubah proxy di `client/vite.config.ts` ke `3002` |
-| Halaman client kosong / 404 saat *deep-link* `/events/<slug>` | Dev server perlu memuat ulang (Vite selalu melayani SPA) | Muat ulang dari `/`; untuk produksi, pastikan *rewrite* SPA aktif (`client/vercel.json` / `client/public/404.html`) |
-| Kamera tidak muncul, `NotAllowedError` | Izin ditolak, atau bukan *secure context* | Akses lewat `http://localhost` atau HTTPS; aktifkan izin Camera pada ikon 🔒 |
-| `NotFoundError`/`OverconstrainedError` saat buka kamera | Tidak ada kamera (PC tanpa webcam) | Uji dari ponsel via HTTPS (tunnel) |
-| Foto tidak muncul di galeri | Foto tersimpan lokal (`/uploads/...`) tetapi `UPLOAD_DIR`/`PUBLIC_BASE_URL` salah untuk domain yang dipakai | Cek `curl -I http://localhost:3001/uploads/<berkas>`; isi `PUBLIC_BASE_URL` untuk akses lintas domain |
-| Perubahan di `server/.env` tidak berefek | Proses lama masih jalan, atau Node terlalu tua untuk `--env-file-if-exists` | Hentikan lalu jalankan ulang `npm start` (butuh Node ≥ 20.12); cek nilai efektif lewat `curl -s localhost:3001/api/health` |
-| Upload gagal: `storageQuotaExceeded` | Masih memakai service account | Pindah ke OAuth2 akun pribadi (§7) |
-| Upload gagal: `invalid_grant` | Consent masih *Testing* (>7 hari) atau akses app dicabut | Publish app ke *In production*, lalu `npm run token` ulang |
-| `npm install` gagal (`EBADENGINE`, galat sintaks ESM) | Node terlalu tua | Pakai Node ≥ 20 (`node -v`); proyek ini diuji di Node v26.11.1 |
-| Data acara & foto hilang tiap deploy di Render | Disk Render *ephemeral* | Ikuti opsi di [DEPLOYMENT.md](../DEPLOYMENT.md) (Drive OAuth2 atau disk permanen) |
-| Musik undangan tidak berbunyi | `undangan/assets/music/musik.mp3` masih 0 byte (terverifikasi) | Ganti dengan berkas MP3 asli |
-| Form RSVP menjawab "mode offline" | `GAS_URL` di `undangan/js/main.js` belum diisi | Isi `GAS_URL` atau tunggu Fase 2 (endpoint backend sendiri) |
-| `undangan/` tampil tanpa font/ikon | CDN Google Fonts / Font Awesome tidak terjangkau | Sambungkan ke internet atau ganti dengan berkas lokal |
-| Port 8090 dipakai proses lain | Proses `python3 -m http.server` sebelumnya masih hidup | Hentikan prosesnya atau pakai port lain, mis. `python3 -m http.server 8091` |
+| `SHEET_ID belum diisi…` (`sheet-not-configured`) | Property `SHEET_ID` kosong | Isi Script Property `SHEET_ID`, lalu jalankan `initSheets` |
+| `Spreadsheet tidak terbuka…` (`sheet-open-failed`) | ID salah, atau spreadsheet milik akun lain | Pastikan ID disalin utuh dan akun Apps Script punya akses |
+| `SESSION_SECRET belum diisi…` (`auth-not-configured`) | Property `SESSION_SECRET` kosong | Isi dengan string acak panjang, lalu login ulang |
+| `ADMIN_PIN belum diisi…` (`admin-not-configured`) | PIN tidak pernah diisi/di-seed | Isi `ADMIN_PIN` atau jalankan `initSheets` (memakai `123456` sementara) |
+| Login gagal `invalid-pin` | PIN salah | Login membandingkan `pin_hash` di tab `Admin`, bukan property `ADMIN_PIN` |
+| Login gagal `admin-inactive` | Kolom `aktif` baris Admin bernilai FALSE | Set `aktif = TRUE` di tab `Admin` |
+| Login gagal `rate-limited` (429) | Lebih dari 8 percobaan/jam | Tunggu satu jam atau naikkan `LOGIN_MAX_ATTEMPTS` |
+| Tamu dapat `invalid-key` (401) | Link salah/slug berbeda, atau kunci sudah dirotasi | Kirim ulang link terbaru (`showEvents()` menampilkan link aktif) |
+| Tamu dapat `event-inactive` (410) | `aktif` acara = FALSE | Aktifkan kembali acara tersebut atau buat acara baru |
+| Unggah gagal `too-large` (413) | Foto > `MAX_UPLOAD_MB` (default 8 MB) | Kecilkan foto di klien (mis. maks. 1600 px), atau naikkan `MAX_UPLOAD_MB` |
+| Unggah gagal `unsupported` (415) | Format HEIC (iPhone) atau MIME tidak diizinkan | Kirim JPEG/PNG/WebP; set kamera iPhone ke "Most Compatible" |
+| Unggah gagal `photo-limit` (409) | Album mencapai `MAX_PHOTOS_PER_EVENT` (800) | Naikkan batas atau buat acara baru |
+| Undo gagal `undo-expired` | Lebih dari `UNDO_WINDOW_MS` (2 menit) | Hapus dari sisi admin (`deletePhoto` dengan sesi) |
+| Galeri kosong padahal ada foto di Drive | Berkas belum tercatat di tab `Photos` | Jalankan `syncAllDrivePhotos()` atau `action=syncPhotos` |
+| Thumbnail tidak muncul | Berkas Drive belum berbagi "anyone with link" | Saat unggah, Apps Script mengatur ini otomatis; untuk berkas hasil sinkron, set izin *Anyone with the link → Viewer* |
+| Foto baru tidak langsung terlihat | Cache daftar foto (default 10 detik) | Tunggu, atau paksa `?refresh=1` |
+| Kamera tidak muncul di HP | Halaman bukan HTTPS atau izin kamera ditolak | Pakai https (GitHub Pages), izinkan kamera, cek privasi browser |
+| Browser menolak request (CORS/preflight) | Body dikirim sebagai `application/json` | Kirim `content-type: text/plain` berisi JSON |
+| Kode lama masih dipakai di `/exec` | Deployment belum diperbarui | Deploy → Manage deployments → Edit → **New version** |
+| `gas-busy` / `gas-quota` | Kuota Apps Script habis atau eksekusi > ±6 menit | Tunggu beberapa menit; proses bertahap (`hasMore`, `syncPhotos`), atau kecilkan `DRIVE_SYNC_MAX_FILES` |
+| `Authorization required` saat Run di editor | Otorisasi belum diberikan | Ulangi Run → Review permissions → Advanced → Allow |
+| Tanggal/waktu bergeser | Zona waktu project | Pastikan `appsscript.json` memakai `"timeZone": "Asia/Jakarta"` |
+| Spreadsheet makin lambat | Ribuan baris di `Photos`/`PrintItems` | Arsipkan baris lama ke spreadsheet lain (simpan header) |
+| Halaman Pages 404 | Pages belum diaktifkan / repo privat | Settings → Pages → Source: GitHub Actions; repo harus publik |
 
-Cek port yang sedang dipakai:
+### Mengganti PIN admin
 
-```bash
-ss -ltnp | grep -E '3001|5173|8090|53682'
+`changeAdminPin_()` ada di `Auth.gs`, tetapi **belum diekspos sebagai action API**, jadi pakai salah satu cara berikut.
+
+**Cara 1 — lewat editor (disarankan).** Tempel fungsi sementara di `Setup.gs`, jalankan sekali, lalu hapus lagi:
+
+```js
+/* SEMENTARA: jalankan dari editor, lalu hapus. */
+function gantiPin() {
+  var admin = readRows_("Admin")[0];
+  Logger.log(changeAdminPin_(admin, "123456", "PinBaruSaya123"));
+}
 ```
 
-## 11. Checklist verifikasi (10 menit)
+PIN baru minimal 6 karakter (maks. 64). Fungsi ini juga memperbarui property `ADMIN_PIN` agar seed berikutnya konsisten.
 
-Jalankan berurutan; semuanya sudah terbukti bekerja pada repo ini.
+**Cara 2 — lewat spreadsheet.** Hapus semua baris data di tab `Admin`, ubah property `ADMIN_PIN` ke PIN baru, lalu login; baris admin dibuat ulang otomatis dari `ADMIN_PIN` (lihat `loginWithPin_` di `Auth.gs`).
 
-| # | Langkah | Ekspektasi |
-| --- | --- | --- |
-| 1 | `node -v && npm -v` | v20.12+ / npm terpasang |
-| 2 | `cd server && npm install` | Selesai tanpa galat |
-| 3 | `cp ../.env.example .env` → isi `ADMIN_TOKEN=tes-admin` | `.env` siap |
-| 4 | `npm start` | `satualbum api v1.1.0 on http://0.0.0.0:3001` + baris `penyimpanan: ...` |
-| 5 | `curl -s localhost:3001/api/health` | `{"ok":true,"version":"1.1.0","storage":{"mode":"local"|"drive"},"drive":{...}}` |
-| 6 | `curl -s -X POST localhost:3001/api/events -H 'content-type: application/json' -H 'x-admin-token: tes-admin' -d '{"name":"Tes Cepat"}'` | `{"event":{"slug":"tes-cepat",...,"uploadKey":"..."}}` (401 bila token salah) |
-| 7 | `cd ../client && npm install && npm run dev` | `VITE v5.4.21 ready` di `http://localhost:5173` |
-| 8 | Buka `http://localhost:5173/create` → isi token admin → buat album → salin link kamera | Muncul dua kotak link (kamera & galeri) |
-| 9 | Buka link kamera → izinkan kamera → *Potret* | Foto masuk album + tombol Undo 10 detik |
-| 10 | `npm test` di `server/` | `pass 31 / fail 0` (termasuk uji restart Drive) |
-| 11 | `cd ../undangan && python3 -m http.server 8090` → buka `http://localhost:8090/undangan.html?to=Bapak%20Andi` | Cover + nama tamu terisi |
-| 12 | `cd .. && node /tmp/cek-skema.mjs docs/DB-SCHEMA.sql` | `OK: 35 tabel, 1 view  (db: :memory:)` |
+Mengganti `SESSION_SECRET` juga langsung mematikan semua token sesi yang beredar.
 
-## 12. Menjalankan di produksi (ringkas)
+## 12. Checklist verifikasi (±10 menit)
 
-Panduan langkah-demi-langkah ada di [DEPLOYMENT.md](../DEPLOYMENT.md); ini ringkasan alur beserta nilai yang wajib diisi.
+- [ ] `?action=ping` membalas `{"ok":true,...}` dengan 23 action
+- [ ] `?action=health` menampilkan `"ready": true`, `counts` 8 tab, dan `errors` kosong
+- [ ] `initSheets` selesai tanpa error dan `selfTest` semua baris `OK`
+- [ ] `login` berhasil dan menghasilkan `sid`, `expiresAt`, `ttlSec`
+- [ ] `createEvent` menghasilkan `slug`, `joinKey`, `links` (kamera/galeri/undangan/rsvp), dan folder Drive `event-<slug>/`
+- [ ] `uploadPhoto` menambah baris di tab `Photos` dan berkas di folder Drive
+- [ ] `photos` mengembalikan foto tersebut; `deletePhoto` berhasil selama jendela Undo
+- [ ] `rsvp` dan `guestbook` menambah baris di tab masing-masing (tanpa duplikat saat dikirim ulang)
+- [ ] (Jika frontend siap) GitHub Pages menyajikan `web/index.html` dan halaman kamera bisa memotret dari HP
 
-| Bagian | Host | Root Directory | Build | Start/Output | Env wajib |
-| --- | --- | --- | --- | --- | --- |
-| `server/` | Render free (blueprint `render.yaml`) | `server` | `npm install` | `npm start` | `NODE_VERSION=22`, `ADMIN_TOKEN`, `PUBLIC_BASE_URL`, `ALLOWED_ORIGIN`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
-| `client/` | GitHub Pages (workflow) / Vercel | `client` | `npm run build` | `dist` | `VITE_API_BASE=https://<api>.onrender.com` (+ `VITE_BASE=/<repo>/` untuk Pages) |
-| `undangan/` | Vercel / GitHub Pages | `undangan` | — | folder statis | — |
+## 13. Catatan & langkah berikutnya
 
-- Repo menyertakan `render.yaml` (blueprint Render), `.github/workflows/deploy-client-pages.yml` (deploy SPA ke Pages), `.github/workflows/ci.yml` (test + build), dan `client/vercel.json` (*rewrite* SPA).
-- **HTTPS wajib** untuk fitur kamera; semua host di atas menyediakannya otomatis.
-- Isi `PUBLIC_BASE_URL` agar URL foto lokal menjadi absolut, dan `ALLOWED_ORIGIN` dengan origin client (tanpa *trailing slash*, pisahkan dengan koma). Pages mengirim `Origin` berupa `https://<user>.github.io` (tanpa path repo).
-- Disk Render *ephemeral* → **jangan** mengandalkan mode lokal di produksi. Isi kredensial Google agar `storage.mode = "drive"`; metadata album (`event.json`) dan foto akan bertahan di Drive setelah restart.
-- Cek kesiapan album kapan saja dengan `cd server && npm run sync`.
-
-
-```bash
-# contoh: push lalu deploy lewat dashboard Render & Vercel
-cd ~/Proyek/Satu-Album
-git add -A && git commit -m "Update" && git push origin master
-```
-
-## 13. Status saat ini & langkah berikutnya
-
-Yang **sudah bisa dijalankan hari ini** (terverifikasi di dokumen ini):
-
-- API Express + **Google Drive sebagai sumber kebenaran** (metadata `event.json` + foto), dengan fallback disk lokal untuk pengembangan.
-- Otorisasi praktis: token admin untuk panitia (`x-admin-token`), kunci album di link tamu (`?k=`).
-- SPA kamera: buat album + link siap-bagikan, 6 preset film, kamera live, **unggah otomatis** (2048 px), tombol **Undo 10 detik**, **antrean offline**, galeri yang menyegarkan diri tiap 20 detik.
-- 31 test otomatis (`npm test`), termasuk klien Drive palsu dan uji “restart” tanpa kehilangan album.
-- Undangan statis (cover, countdown, kalender, amplop, RSVP/buku tamu ke GAS).
-- Skema database lengkap (`docs/DB-SCHEMA.sql`) yang bisa diuji tanpa mengganggu data.
-
-Yang **belum tersambung**:
-
-| Item | Kondisi | Rencana |
-| --- | --- | --- |
-| Skema SQL → aplikasi | `docs/DB-SCHEMA.sql` masih dokumen; aplikasi memakai Drive/JSON | Fase 0–1: `server/migrations/0001_init.sql` + repositori SQLite (`node:sqlite`) |
-| `.env` server | ~~Tidak dibaca `npm start`~~ → **sudah diperbaiki** (`--env-file-if-exists`, §4) | — |
-| Moderasi/panel panitia | Belum ada UI; saat ini lewat `curl` (lihat DEPLOYMENT.md §7) | Fase 3–4 dashboard |
-| RSVP/buku tamu backend | Masih mengarah ke Google Apps Script | Fase 2 per [API.md](./API.md) |
-
-| Undangan per acara | `undangan/undangan.html` masih menampilkan pasangan contoh "Ani & Budi" | Fase 3–4: render dari data acara |
-| Blok undangan lengkap | 15 dari 27 blok belum dibuat | [BLOCKS.md](./BLOCKS.md) + [ROADMAP.md](./ROADMAP.md) |
-| Tema premium, kamera tamu (guestcam), peran vendor | Belum ada | Fase 8 dst. (keputusan R3/R4) |
-
-Urutan kerja yang disarankan ada di [ROADMAP.md](./ROADMAP.md) — mulai dari Fase 0 (fondasi server, migrasi, seed, impor JSON lama) sebelum menulis fitur baru.
+- Aktifkan sinkronisasi Drive otomatis bila tamu sering mengunggah lewat aplikasi Drive: jalankan `installDriveSyncTrigger()`.
+- Setiap kali kode diubah: buat **New version** di deployment (langkah 7), lalu jalankan ulang `selfTest`.
+- Backend di `gas/` adalah sumber kebenaran. `docs/PRD.md`, `ARCHITECTURE.md`, `API.md`, dan `DB-SCHEMA.sql` sebagian masih berisi rencana lama (Express + SQLite + React/Vite) yang **tidak** dipakai.
+- Frontend `web/` belum ada — langkah 8 menjadi acuan struktur folder dan kontrak pemanggilan API.
