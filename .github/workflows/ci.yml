@@ -1,40 +1,33 @@
-name: CI (server + client)
+name: CI (Web App Apps Script)
 
+# Backend sekarang 100% Google Apps Script (folder gas/), jadi repo ini tidak
+# punya package.json: tidak ada `npm ci`, test dijalankan langsung dengan Node.
 on:
   push:
     branches: [master, main]
   pull_request:
 
 jobs:
-  server:
-    name: Test server (node:test)
+  gas:
+    name: Test Apps Script (node:test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: server/package-lock.json
-      - run: npm ci
-        working-directory: server
-      # Test memakai klien Drive palsu (server/test/helpers/fake-drive.js),
-      # jadi tidak butuh kredensial Google sama sekali.
-      - name: Jalankan test
-        run: npm test
-        working-directory: server
 
-  client:
-    name: Build client (tsc + vite)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: client/package-lock.json
-      - run: npm ci
-        working-directory: client
-      - run: npm run build
-        working-directory: client
+      # `node --check` menolak berkas .gs (ERR_UNKNOWN_FILE_EXTENSION), jadi
+      # syntax.mjs mengompilasi semuanya lewat vm.Script.
+      - name: Cek sintaks gas/*.gs
+        run: node gas/test/syntax.mjs
+
+      # Deteksi helper yang dipanggil tapi tidak terdefinisi di berkas mana pun.
+      - name: Cek referensi antar berkas .gs
+        run: node gas/test/refs.mjs
+
+      # Uji end-to-end router Code.gs memakai tiruan SpreadsheetApp, DriveApp,
+      # CacheService, dan PropertiesService (gas/test/harness.mjs) — tidak butuh
+      # kredensial Google sama sekali.
+      - name: Jalankan test API
+        run: node --test gas/test

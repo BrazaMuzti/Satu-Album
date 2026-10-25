@@ -1,0 +1,52 @@
+name: Deploy frontend (web/) ke GitHub Pages
+
+# Frontend statis tinggal di folder web/ (lihat gas/Config.gs: "Frontend:
+# GitHub Pages"). URL web app Apps Script (/exec) disalin ke konstanta
+# API_BASE di web/assets/app.js — lihat gas/Setup.gs > initSheets (langkah 2).
+#
+# Prasyarat (sekali saja) di repo → Settings:
+#   1. Pages → Source: "GitHub Actions".
+#   2. Repo harus publik (Pages gratis hanya untuk repo publik).
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "web/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # web/ belum ada isinya sampai frontend ditulis, jadi gagal cepat dengan
+      # pesan jelas daripada mengunggah direktori kosong ke Pages.
+      - name: Pastikan web/index.html tersedia
+        run: |
+          if [ ! -f web/index.html ]; then
+            echo "::error::web/index.html tidak ditemukan. Isi dulu frontend statis di folder web/ (lihat gas/Setup.gs) sebelum deploy Pages."
+            exit 1
+          fi
+
+      # Tanpa langkah build: web/ sudah berupa berkas statis siap saji, dan
+      # Pages versi Actions menyajikan artefak apa adanya (tanpa Jekyll).
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4
