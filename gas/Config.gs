@@ -1,18 +1,31 @@
 /* Konfigurasi terpusat Web App Satu-Album (Google Apps Script).
 
    Semua nilai disimpan di **Script Properties** (Project Settings → Script
-   properties, atau `setConfigProperty_` dari editor), BUKAN di kode, supaya
-   token admin tidak ikut ter-commit ke Git.
+   properties, atau fungsi `setConfigProperty_` dari editor), BUKAN di kode,
+   supaya token/rahasia tidak ikut ter-commit ke Git.
 
-   Yang wajib diisi hanya `ADMIN_TOKEN`; sisanya punya default aman. Nama kunci
-   Property sengaja dibuat generik (tanpa awalan GOOGLE_) karena GAS sendiri
-   yang menjadi Drive client — lihat tabel pemetaan di gas/README.md. */
+   Arsitektur baru (100% gratis):
+     - Database  : Google Sheets  (SHEET_ID → lihat gas/Sheets.gs)
+     - Storage   : Google Drive   (folder foto per acara → gas/DriveStore.gs)
+     - Frontend  : GitHub Pages   (folder web/)
+
+   Property yang WAJIB diisi:
+     SHEET_ID      → ID Spreadsheet database (ambil dari URL /edit/d/<ID>/edit)
+     ADMIN_PIN     → PIN awal admin (dipakai saat initSheets untuk seed baris Admin)
+     SESSION_SECRET→ kunci HMAC untuk token sesi admin (bebas, panjang)
+
+   Property opsional punya default aman di CONFIG_DEFAULTS. */
 
 /** Nilai default bila Script Property belum diisi. */
 var CONFIG_DEFAULTS = {
-  ADMIN_TOKEN: "",
+  SHEET_ID: "",
+  ADMIN_PIN: "",
+  SESSION_SECRET: "",
+  BASE_URL: "",
   DRIVE_ROOT_FOLDER_NAME: "Satu-Album",
   DRIVE_ROOT_FOLDER_ID: "",
+  SESSION_TTL_SEC: "28800",        /* 8 jam */
+  LOGIN_MAX_ATTEMPTS: "8",         /* percobaan login per jam per pinId */
   MAX_PHOTOS_PER_EVENT: "800",
   MAX_UPLOAD_MB: "8",
   UNDO_WINDOW_MS: "120000",
@@ -24,7 +37,7 @@ var CONFIG_DEFAULTS = {
   ALLOWED_MIME: "image/jpeg,image/png,image/webp"
 };
 
-var CONFIG_VERSION = "2.0.0-gas";
+var CONFIG_VERSION = "3.0.0-sheets";
 
 /* Cache config per-eksekusi (GAS memuat ulang global setiap invocation). */
 var CONFIG_CACHE = null;
@@ -59,11 +72,15 @@ function config_() {
 
   CONFIG_CACHE = {
     version: CONFIG_VERSION,
-    /* Beberapa token dipisah koma → bisa rotasi token tanpa memutus panitia lama. */
-    adminTokens: list(raw("ADMIN_TOKEN")),
+    sheetId: String(raw("SHEET_ID")).trim(),
+    adminPin: String(raw("ADMIN_PIN")),
+    sessionSecret: String(raw("SESSION_SECRET")),
+    baseUrl: String(raw("BASE_URL")).trim().replace(/\/+$/, ""),
     rootFolderName: String(raw("DRIVE_ROOT_FOLDER_NAME")).trim() || "Satu-Album",
     /* Diisi otomatis saat root folder pertama kali dibuat/ditemukan. */
     rootFolderId: String(raw("DRIVE_ROOT_FOLDER_ID")).trim(),
+    sessionTtlSec: Math.round(num(raw("SESSION_TTL_SEC"), 28800)),
+    loginMaxAttempts: Math.round(num(raw("LOGIN_MAX_ATTEMPTS"), 8)),
     maxPhotosPerEvent: Math.round(num(raw("MAX_PHOTOS_PER_EVENT"), 800)),
     maxUploadBytes: Math.round(num(raw("MAX_UPLOAD_MB"), 8) * 1024 * 1024),
     undoWindowMs: Math.round(num(raw("UNDO_WINDOW_MS"), 120000)),
@@ -84,6 +101,12 @@ function setConfigProperty_(key, value) {
   else props_().setProperty(key, String(value));
   CONFIG_CACHE = null;
   return config_();
+}
+
+/** Base URL frontend (GitHub Pages), tanpa garis miring di akhir.
+    Kosong → link dibuat relatif di sisi frontend. */
+function publicBaseUrl_() {
+  return config_().baseUrl || "";
 }
 
 /** Simpan ID root folder agar pencarian nama folder tidak diulang tiap request. */

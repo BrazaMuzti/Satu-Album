@@ -1,105 +1,188 @@
-/* Utilitas manual Satu-Album. Fungsi di file ini TIDAK dipanggil lewat HTTP —
-   jalankan dari editor Apps Script (pilih fungsi → Run) atau lewat menu
-   "Run" untuk menyiapkan Drive, memeriksa kesehatan, dan menguji end-to-end. */
+/**
+ * Satu-Album - Setup & Diagnostik (Google Apps Script)
+ *
+ * Semua fungsi di file ini dijalankan MANUAL dari editor Apps Script
+ * (pilih fungsi -> Run). Tidak pernah dipanggil dari web app.
+ */
 
-/** Jalankan sekali setelah mengisi Script Properties. */
-function setupDrive() {
-  var cfg = config_();
-  var root = driveRoot_();
-  var report = [
-    "root folder   : " + root.getName() + " (" + root.getId() + ")",
-    "ADMIN_TOKEN   : " + (cfg.adminTokens.length ? "terisi (" + cfg.adminTokens.length + " token)" : "BELUM DIISI → Project Settings → Script properties"),
-    "batas unggah  : " + Math.round(cfg.maxUploadBytes / 1024 / 1024) + " MB per foto, " + cfg.maxPhotosPerEvent + " foto per album",
-    "jendela Undo  : " + Math.round(cfg.undoWindowMs / 1000) + " detik",
-    "cache         : " + cfg.cacheTtlSec + " detik",
-    "jumlah album  : " + listEvents_(true).length
-  ].join("\n");
-  Logger.log(report);
-  return report;
-}
+/** Base URL frontend yang dipakai untuk membuat link QR. */
+const SETUP_DEFAULT_BASE_URL = "https://brazamuzti.github.io/Satu-Album";
 
-/** Simpan token panitia tanpa menempelkannya di kode (bisa dipisah koma). */
-function setAdminToken(token) {
-  var saved = setConfigProperty_("ADMIN_TOKEN", token);
-  Logger.log("ADMIN_TOKEN tersimpan (" + saved.adminTokens.length + " token aktif, " + String(token || "").length + " karakter).");
-  return saved.adminTokens.length;
-}
+/**
+ * Jalankan SEKALI setelah SHEET_ID, ADMIN_PIN, SESSION_SECRET diisi.
+ * Menyiapkan 8 tab sheet + header, seed admin, dan root folder Drive.
+ */
+function initSheets() {
+  const cfg = config_();
+  const report = [];
 
-/** Kesehatan penyimpanan + batas yang berlaku (sama dengan action=health). */
-function showHealth() {
-  var text = JSON.stringify(health_({ force: true }), null, 2);
-  Logger.log(text);
-  return text;
-}
-
-/** Daftar album beserta kunci tamunya (hanya untuk panitia). */
-function showEvents() {
-  var events = listEvents_(true).map(function (meta) {
-    return presentEvent_(meta, true);
-  });
-  var text = JSON.stringify(events, null, 2);
-  Logger.log(text);
-  return text;
-}
-
-/** Padanan `npm run sync` versi lama: perbaiki `count` di setiap event.json. */
-function syncAlbumMetadata() {
-  var cfg = config_();
-  var events = listEvents_(true);
-  var lines = [];
-  for (var i = 0; i < events.length; i += 1) {
-    var slug = events[i].slug;
-    var photos = listPhotos_(slug, { force: true, limit: cfg.maxPhotosPerEvent + 500 });
-    var bytes = 0;
-    for (var j = 0; j < photos.length; j += 1) bytes += Number(photos[j].size || 0);
-    reconcileCount_(slug, photos.length);
-    lines.push(
-      "- " + slug + ": " + photos.length + " foto, " + Math.round((bytes / 1024 / 1024) * 10) / 10 + " MB" +
-        (events[i].legacy ? " [legacy]" : "")
+  if (!cfg.sheetId) {
+    throw new Error(
+      "SHEET_ID belum diisi. Buka Project Settings > Script Properties, " +
+        "tambahkan SHEET_ID = <ID spreadsheet>."
     );
   }
-  var report = lines.length ? lines.join("\n") : "(belum ada album)";
-  Logger.log(report);
-  return report;
+
+  try {
+    const ss = spreadsheet_();
+    report.push("Spreadsheet: " + ss.getName() + " (" + ss.getId() + ")");
+  } catch (err) {
+    throw new Error(
+      "Tidak bisa membuka spreadsheet SHEET_ID=" + cfg.sheetId + ". " + (err && err.message)
+    );
+  }
+
+  const created = ensureSchema_();
+  report.push(created.length ? "Tab dibuat: " + created.join(", ") : "Semua tab sudah ada.");
+
+  if (!cfg.adminPin) {
+    /* Seed butuh PIN; pakai PIN sementara agar initSheets tidak gagal. */
+    setConfigProperty_("ADMIN_PIN", "123456");
+    report.push(
+      "ADMIN_PIN kosong -> admin dibuat dengan PIN sementara '123456'. " +
+        "Segera ganti PIN dari panel admin (action=login lalu ganti PIN)."
+    );
+  }
+  const admin = seedAdminFromConfig_();
+  report.push(admin ? "Admin: " + admin.admin_id + " (" + admin.nama + ")" : "Admin: sudah ada.");
+
+  const root = driveRoot_();
+  report.push("Root folder Drive: " + root.getName() + " (" + root.getId() + ")");
+
+  if (!cfg.baseUrl) {
+    report.push(
+      "BASE_URL kosong -> link QR memakai default " + SETUP_DEFAULT_BASE_URL +
+        ". Jalankan setBaseUrl() bila domain berbeda."
+    );
+  } else {
+    report.push("Base URL frontend: " + cfg.baseUrl);
+  }
+
+  report.push("SELESAI. Langkah berikutnya:");
+  report.push("1. Deploy > New deployment > Web app (Execute as: Me, Access: Anyone).");
+  report.push("2. Salin URL /exec ke konstanta API_BASE di web/assets/app.js.");
+  report.push("3. Upload web/ ke GitHub Pages.");
+
+  const text = report.join("\n");
+  Logger.log(text);
+  return text;
 }
 
-/* PNG 1×1 (70 byte) yang valid — dipakai selfTest() untuk membuktikan jalur
-   validasi → simpan → baca → hapus tanpa perlu file contoh di repo. */
-var SETUP_TEST_PNG_BASE64 =
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg==";
+/** Mengatur BASE_URL (dipakai untuk link QR / undangan). */
+function setBaseUrl() {
+  setConfigProperty_("BASE_URL", SETUP_DEFAULT_BASE_URL);
+  Logger.log("BASE_URL = " + publicBaseUrl_());
+  return publicBaseUrl_();
+}
 
-/** Uji end-to-end di dalam Drive Anda sendiri: buat album → unggah → baca →
- *  hapus foto → hapus album. Semua yang dibuat ikut dibersihkan (folder masuk
- *  Trash Drive, masih bisa dipulihkan ±30 hari). */
+/** Ringkasan cepat isi spreadsheet + Drive. */
+function showHealth() {
+  const health = health_();
+  Logger.log(JSON.stringify(health, null, 2));
+  return health;
+}
+
+/** Daftar semua event beserta link publiknya. */
+function showEvents() {
+  const events = listEventsForAdmin_();
+  events.forEach(function (ev) {
+    Logger.log(
+      [ev.slug, ev.nama, ev.jenis, ev.aktif ? "aktif" : "nonaktif", (ev.count || 0) + " foto"].join(" | ") +
+        "\n  kamera   : " + ev.links.camera +
+        "\n  galeri   : " + ev.links.galeri +
+        "\n  undangan : " + ev.links.undangan +
+        "\n  rsvp     : " + ev.links.rsvp
+    );
+  });
+  Logger.log("Total event: " + events.length);
+  return events;
+}
+
+/**
+ * Sinkronisasi semua folder Drive (event-*) ke sheet Photos.
+ * Cocok dijalankan manual maupun lewat trigger harian.
+ */
+function syncAllDrivePhotos() {
+  const rows = listEventRows_(false);
+  const summary = [];
+  let totalAdded = 0;
+
+  rows.forEach(function (row) {
+    try {
+      let added = 0;
+      let guard = 0;
+      let more = true;
+      while (more && guard < 10) {
+        const res = syncDrivePhotos_(row, {});
+        added += res.added;
+        more = res.hasMore;
+        guard += 1;
+      }
+      totalAdded += added;
+      summary.push(row.slug + ": +" + added);
+    } catch (err) {
+      summary.push(row.slug + ": ERROR " + (err && err.message));
+    }
+  });
+
+  const text = summary.join("\n") + "\n\nTotal foto baru: " + totalAdded;
+  Logger.log(text);
+  return text;
+}
+
+/** Pasang trigger sinkronisasi Drive otomatis setiap 6 jam. */
+function installDriveSyncTrigger() {
+  const handler = "syncAllDrivePhotos";
+  const existing = ScriptApp.getProjectTriggers().filter(function (t) {
+    return t.getHandlerFunction() === handler;
+  });
+  existing.forEach(function (t) {
+    ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger(handler).timeBased().everyHours(6).create();
+  Logger.log("Trigger " + handler + " terpasang (setiap 6 jam).");
+  return true;
+}
+
+/** Uji cepat seluruh komponen backend. */
 function selfTest() {
-  var lines = [];
-  var name = "Uji Satu-Album " + new Date().toISOString().slice(0, 16).replace("T", " ");
-  var event = createEventMeta_({ name: name, type: "lainnya", preset: "funsaver" });
-  lines.push("buat album       : " + event.slug + " (kunci " + String(event.uploadKey).slice(0, 8) + "…)");
+  const steps = [];
+  const check = function (label, fn) {
+    try {
+      const value = fn();
+      steps.push("OK   " + label + (value === undefined ? "" : " -> " + value));
+      return true;
+    } catch (err) {
+      steps.push("FAIL " + label + " -> " + (err && err.message ? err.message : err));
+      return false;
+    }
+  };
 
-  var bytes = bytesFromBase64_(SETUP_TEST_PNG_BASE64);
-  var check = validateImage_(bytes, config_().allowedMime, "image/png");
-  lines.push(
-    "validasi gambar  : " +
-      (check.ok ? "ok (" + check.mime + ", " + bytes.length + " byte)" : "GAGAL → " + check.error)
-  );
+  check("config_()", function () {
+    const cfg = config_();
+    return "version=" + cfg.version + ", sheetId=" + (cfg.sheetId ? "ada" : "KOSONG");
+  });
+  check("spreadsheet_()", function () {
+    return spreadsheet_().getName();
+  });
+  check("ensureSchema_()", function () {
+    return ensureSchema_();
+  });
+  check("driveRoot_()", function () {
+    return driveRoot_().getName();
+  });
+  check("listEventRows_()", function () {
+    return listEventRows_(false).length + " event";
+  });
+  check("cache round-trip", function () {
+    const key = "selftest:" + Date.now();
+    cachePutJson_(key, { ok: true });
+    const got = cacheGetJson_(key);
+    cacheRemove_(key);
+    return got && got.ok ? "ok" : "GAGAL";
+  });
 
-  var added = addPhoto_({ slug: event.slug, bytes: bytes, mime: check.mime });
-  lines.push("unggah foto      : " + added.photo.id + " (" + added.photo.thumb + ")");
-
-  var listed = listPhotos_(event.slug, { force: true });
-  lines.push("baca daftar foto : " + listed.length + " foto");
-
-  var meta = getEventMeta_(event.slug, true);
-  lines.push("count di event   : " + (meta ? meta.count : "?"));
-
-  var removed = removePhoto_(event.slug, added.photo.id);
-  lines.push("hapus foto       : " + (removed ? "ok" : "GAGAL"));
-
-  lines.push("hapus album      : " + (trashEvent_(event.slug) ? "ok (folder → Trash Drive)" : "GAGAL"));
-
-  var report = lines.join("\n");
-  Logger.log(report);
-  return report;
+  const text = steps.join("\n");
+  Logger.log(text);
+  return text;
 }
-

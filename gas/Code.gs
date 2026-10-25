@@ -3,11 +3,11 @@
    GAS hanya menyediakan doGet/doPost dan TIDAK bisa mengatur status code atau
    header respons, jadi seluruh API berbentuk RPC:
 
-     GET  <web-app-url>?action=<nama>&...        → baca  (health, event, photos, events)
-     POST <web-app-url>                          → tulis (body JSON)
+     GET  <web-app-url>?action=<nama>&...        -> baca  (health, event, photos, events)
+     POST <web-app-url>                          -> tulis (body JSON)
 
    Body dikirim sebagai `text/plain` (bukan application/json) supaya browser
-   memperlakukan permintaan sebagai *simple request* → tidak ada preflight
+   memperlakukan permintaan sebagai *simple request* -> tidak ada preflight
    OPTIONS (GAS tidak punya doOptions). GAS sendiri yang mengirim header
    `Access-Control-Allow-Origin: *`, jadi CORS aman untuk GET & POST.
 
@@ -16,23 +16,21 @@
      { ok: true,  data: {...}, serverTime: "..." }
      { ok: false, status: 401, code: "invalid-key", error: "...", serverTime: "..." }
 
-   `status` adalah status HTTP yang "seharusnya" — klien memetakannya kembali
-   ke ApiError seperti pada versi Express.
+   `status` adalah status HTTP yang "seharusnya" - klien memetakannya kembali
+   ke ApiError.
 
-   Pemetaan dari server/index.js:
-     GET    /api/health                       → action=health
-     POST   /api/events                       → action=createEvent   (admin)
-     GET    /api/events                       → action=events        (admin)
-     GET    /api/events/:slug                 → action=event
-     PATCH  /api/events/:slug                 → action=updateEvent   (admin)
-     DELETE /api/events/:slug                 → action=deleteEvent   (admin)
-     POST   /api/events/:slug/photos          → action=uploadPhoto
-     GET    /api/events/:slug/photos          → action=photos
-     DELETE /api/events/:slug/photos/:photoId → action=deletePhoto   */
+   Otorisasi:
+     - Admin : token sesi `sid` (hasil action=login dengan PIN).
+     - Tamu  : `slug` + kunci `k` dari link kamera/galeri/undangan.
+
+   Daftar action ada di API_ACTIONS (dipakai action=ping untuk handshake). */
 
 var API_ACTIONS = [
-  "health",
   "ping",
+  "health",
+  "login",
+  "logout",
+  "me",
   "events",
   "createEvent",
   "event",
@@ -40,7 +38,17 @@ var API_ACTIONS = [
   "deleteEvent",
   "uploadPhoto",
   "photos",
-  "deletePhoto"
+  "deletePhoto",
+  "syncPhotos",
+  "template",
+  "saveTemplate",
+  "createPrintOrder",
+  "listPrintOrders",
+  "updatePrintOrderStatus",
+  "rsvp",
+  "listRsvp",
+  "guestbook",
+  "deleteGuestbook"
 ];
 
 function doGet(e) {
@@ -56,7 +64,7 @@ function handleRequest_(e) {
   var callback = jsonpCallback_(params.callback);
   try {
     var body = readJsonBody_(e);
-    var action = String((params.action || (body && body.action) || "")).trim();
+    var action = String(params.action || (body && body.action) || "").trim();
     if (!action) fail_("parameter `action` wajib diisi (contoh: ?action=health)", 400, "bad-action");
     var handler = API_ROUTES[action];
     if (!handler) {
@@ -95,31 +103,8 @@ function jsonpCallback_(value) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(text) ? text : null;
 }
 
+
 /* ── Otorisasi ────────────────────────────────────────────────────────── */
-
-/* Panitia memakai `adminToken` (nilai Script Property ADMIN_TOKEN); tamu
-   memakai kunci album `k` dari link yang dibagikan. */
-
-function isAdmin_(params, body) {
-  var cfg = config_();
-  if (cfg.adminTokens.length === 0) return false;
-  var value = String(pick_(params, body, "adminToken") || pick_(params, body, "token") || "");
-  if (!value) return false;
-  var ok = false;
-  /* Sengaja tanpa early-return: waktu komputasi seragam untuk semua token. */
-  for (var i = 0; i < cfg.adminTokens.length; i += 1) {
-    if (secretsEqual_(cfg.adminTokens[i], value)) ok = true;
-  }
-  return ok;
-}
-
-function requireAdmin_(params, body) {
-  var cfg = config_();
-  if (cfg.adminTokens.length === 0) {
-    fail_("ADMIN_TOKEN belum diisi di Script Properties", 503, "admin-not-configured");
-  }
-  if (!isAdmin_(params, body)) fail_("token admin tidak valid", 401, "invalid-admin");
-}
 
 function requireSlug_(params, body) {
   var slug = String(pick_(params, body, "slug") || "").trim();
@@ -127,78 +112,153 @@ function requireSlug_(params, body) {
   return slug;
 }
 
-/** Tamu wajib membawa kunci yang cocok dengan metadata acara (atau token admin). */
+/** Kunci tamu dari body/parameter (`k` atau `key`). */
+function guestKey_(params, body) {
+  return String(pick_(params, body, "k") || pick_(params, body, "key") || "");
+}
+
+/**
+ * Validasi konteks tamu: slug + kunci `k` (atau sesi admin).
+ * @return {Object} { row, slug, admin }
+ */
 function requireGuest_(params, body) {
   var slug = requireSlug_(params, body);
-  var meta = getEventMeta_(slug);
-  if (!meta) fail_("event not found", 404, "not-found");
-  var admin = isAdmin_(params, body);
-  var key = String(pick_(params, body, "k") || pick_(params, body, "key") || "");
-  if (!admin && !keyMatches_(meta, key)) fail_("link tidak valid atau kunci tamu salah", 401, "invalid-key");
-  return { slug: slug, meta: meta, admin: admin };
+  var row = findEventBySlug_(slug);
+  if (!row) fail_("event not found", 404, "not-found");
+
+  var admin = false;
+  if (sessionToken_(params, body)) {
+    /* Sesi kedaluwarsa tidak boleh menghalangi tamu yang membawa kunci sah. */
+    try {
+      requireSession_(params, body);
+      admin = true;
+    } catch (err) {
+      if (!(err instanceof ApiFailure)) throw err;
+    }
+  }
+
+  if (!admin) {
+    if (!isActive_(row.aktif)) fail_("acara sudah tidak aktif", 410, "event-inactive");
+    var key = guestKey_(params, body);
+    if (!key || !secretsEqual_(String(row.join_key || "x"), key)) {
+      fail_("link tidak valid atau kunci tamu salah", 401, "invalid-key");
+    }
+  }
+  return { row: row, slug: slug, admin: admin };
+}
+
+/** Baris Events dari `slug` atau `eventId` (khusus admin). */
+function requireEventForAdmin_(params, body) {
+  var slug = String(pick_(params, body, "slug") || "").trim();
+  var eventId = String(pick_(params, body, "eventId") || "").trim();
+  var row = slug ? findEventBySlug_(slug) : eventId ? findEventById_(eventId) : null;
+  if (!row) fail_("event not found", 404, "not-found");
+  return row;
+}
+
+/** Susun objek input event dari body + query (nama/name, jenis/type, ...). */
+function eventInput_(params, body) {
+  var input = {};
+  var keys = ["nama", "name", "jenis", "type", "tanggal", "lokasi", "preset", "revealAt", "rotateKey", "aktif", "slug"];
+  for (var i = 0; i < keys.length; i += 1) {
+    var value = pick_(params, body, keys[i]);
+    if (value !== undefined) input[keys[i]] = value;
+  }
+  if (body && body.rotateUploadKey !== undefined) input.rotateKey = body.rotateUploadKey;
+  return input;
+}
+
+/** Ringkas satu baris Events untuk respons admin (kunci & link ikut). */
+function adminEventView_(row) {
+  var counts = photoCountsByEvent_();
+  var event = presentEventRow_(row, counts[String(row.event_id)] || 0);
+  event.joinKey = String(row.join_key || "");
+  event.links = eventLinks_(row, publicBaseUrl_());
+  return event;
 }
 
 /* ── Router ───────────────────────────────────────────────────────────── */
 
 var API_ROUTES = {
-  /** Handshake: dipakai klien untuk memastikan URL deployment benar & hidup. */
+  /** Handshake: klien memakai ini untuk memastikan URL deployment benar. */
   ping: function () {
     return { pong: true, version: config_().version, actions: API_ACTIONS };
   },
 
-  health: function (params) {
-    return health_({ force: params.refresh === "1" });
+  /** Status penyimpanan; tidak pernah melempar error agar mudah didiagnosis. */
+  health: function () {
+    return health_();
   },
 
+  /* ── Sesi admin ──────────────────────────────────────────────────────── */
+
+  login: function (params, body) {
+    return loginWithPin_(pick_(params, body, "pin"));
+  },
+
+  logout: function (params, body) {
+    requireSession_(params, body);
+    revokeSession_(sessionToken_(params, body));
+    return { ok: true };
+  },
+
+  me: function (params, body) {
+    return { admin: presentAdmin_(requireSession_(params, body)) };
+  },
+
+  /* ── Acara ───────────────────────────────────────────────────────────── */
+
   events: function (params, body) {
-    requireAdmin_(params, body);
-    /* withKeys: hanya endpoint admin yang boleh melihat kunci link tamu. */
-    var events = listEvents_(params.refresh === "1");
-    return {
-      events: events.map(function (meta) {
-        return presentEvent_(meta, true);
-      }),
-      stale: false
-    };
+    requireSession_(params, body);
+    var events = listEventsForAdmin_();
+    return { events: events, total: events.length };
   },
 
   createEvent: function (params, body) {
-    requireAdmin_(params, body);
-    var gate = rateLimit_("create", config_().rateCreatePerHour, 3600);
-    if (!gate.allowed) fail_("terlalu banyak permintaan, coba lagi nanti", 429, "rate-limited");
-    var event = createEventMeta_({
-      name: pick_(params, body, "name"),
-      type: pick_(params, body, "type"),
-      preset: pick_(params, body, "preset"),
-      revealAt: pick_(params, body, "revealAt") || null
-    });
-    return { event: event };
+    requireSession_(params, body);
+    return { event: createEvent_(eventInput_(params, body)) };
   },
 
+  /** Detail acara; `authorized` menandakan kunci tamu cocok. */
   event: function (params, body) {
     var slug = requireSlug_(params, body);
-    var meta = getEventMeta_(slug, params.refresh === "1");
-    if (!meta) fail_("event not found", 404, "not-found");
-    var key = String(pick_(params, body, "k") || pick_(params, body, "key") || "");
-    var authorized = isAdmin_(params, body) || keyMatches_(meta, key);
-    /* Kunci tamu hanya dikembalikan bila benar-benar cocok (atau pemanggil admin). */
-    return { event: presentEvent_(meta, authorized), authorized: authorized, stale: false };
+    var row = findEventBySlug_(slug);
+    if (!row) fail_("event not found", 404, "not-found");
+    var key = guestKey_(params, body);
+    var authorized = Boolean(key) && secretsEqual_(String(row.join_key || "x"), key);
+    if (!authorized && sessionToken_(params, body)) {
+      try {
+        requireSession_(params, body);
+        authorized = true;
+      } catch (err) {
+        if (!(err instanceof ApiFailure)) throw err;
+      }
+    }
+    if (!authorized && !isActive_(row.aktif)) fail_("acara sudah tidak aktif", 410, "event-inactive");
+
+    var counts = photoCountsByEvent_();
+    var event = presentEventRow_(row, counts[String(row.event_id)] || 0);
+    var out = { event: event, authorized: authorized };
+    if (authorized) {
+      out.event.joinKey = String(row.join_key || "");
+      out.event.links = eventLinks_(row, publicBaseUrl_());
+    }
+    return out;
   },
 
   updateEvent: function (params, body) {
-    requireAdmin_(params, body);
-    var slug = requireSlug_(params, body);
-    var event = updateEventMeta_(slug, body);
-    if (!event) fail_("event not found", 404, "not-found");
-    return { event: event };
+    requireSession_(params, body);
+    var input = eventInput_(params, body);
+    return { event: updateEvent_(input) };
   },
 
   deleteEvent: function (params, body) {
-    requireAdmin_(params, body);
-    var slug = requireSlug_(params, body);
-    if (!trashEvent_(slug)) fail_("event not found", 404, "not-found");
-    return { ok: true };
+    requireSession_(params, body);
+    var removed = deleteEvent_({ slug: requireSlug_(params, body) });
+    return { ok: true, removed: removed };
   },
+
+  /* ── Foto ────────────────────────────────────────────────────────────── */
 
   uploadPhoto: function (params, body) {
     var cfg = config_();
@@ -209,35 +269,33 @@ var API_ROUTES = {
     var data = String(pick_(params, body, "data") || "");
     if (!data) fail_("photo is required", 400, "bad-request");
     var bytes = bytesFromBase64_(data);
-    if (bytes && bytes.length > cfg.maxUploadBytes) {
+    if (!bytes) fail_("data foto bukan base64 yang valid", 400, "bad-request");
+    if (bytes.length > cfg.maxUploadBytes) {
       fail_("foto terlalu besar (maks " + Math.round(cfg.maxUploadBytes / 1024 / 1024) + " MB)", 413, "too-large");
     }
     var check = validateImage_(bytes, cfg.allowedMime, pick_(params, body, "mime"));
     if (!check.ok) fail_(check.error, check.status, check.code);
-    if (Number(ctx.meta.count || 0) >= cfg.maxPhotosPerEvent) {
+
+    var count = photoCount_(ctx.row);
+    if (count >= cfg.maxPhotosPerEvent) {
       fail_("album sudah penuh (" + cfg.maxPhotosPerEvent + " foto)", 409, "photo-limit");
     }
 
-    var result = addPhoto_({ slug: ctx.slug, bytes: bytes, mime: check.mime });
+    var photo = storePhoto_(ctx.row, bytes, check.mime, "camera");
     return {
-      photo: result.photo,
-      /* Klien memakai serverTime untuk polling `?since=`. */
+      photo: photo,
       undoWindowMs: cfg.undoWindowMs,
-      count: Number(ctx.meta.count || 0) + 1,
+      count: count + 1,
       serverTime: new Date().toISOString()
     };
   },
 
   photos: function (params, body) {
-    var cfg = config_();
     var ctx = requireGuest_(params, body);
     var force = String(pick_(params, body, "refresh") || "") === "1";
     var since = String(pick_(params, body, "since") || "");
-    /* fromCache: true = daftar dilayani dari CacheService (bukan baca Drive). */
     var hasCached = !force && cacheHas_("photos:" + ctx.slug);
-    var all = listPhotos_(ctx.slug, { force: force, limit: cfg.maxPhotosPerEvent + 500 });
-    /* refresh=1 sekaligus menyelaraskan `count` di event.json dengan folder. */
-    if (force) reconcileCount_(ctx.slug, all.length);
+    var all = listPhotos_(ctx.row, { force: force });
     var list = since
       ? all.filter(function (photo) {
           return String(photo.createdAt) > since;
@@ -246,35 +304,102 @@ var API_ROUTES = {
     return {
       photos: list,
       count: all.length,
-      stale: false,
       fromCache: hasCached,
       serverTime: new Date().toISOString()
     };
   },
 
   deletePhoto: function (params, body) {
-    var cfg = config_();
     var ctx = requireGuest_(params, body);
     var photoId = String(pick_(params, body, "photoId") || "").trim();
     if (!photoId) fail_("photoId wajib diisi", 400, "bad-request");
+    return { ok: true, photo: removePhoto_(ctx.row, photoId, ctx.admin) };
+  },
 
-    if (!ctx.admin) {
-      /* Tamu hanya boleh membatalkan fotonya sendiri dalam jendela Undo. */
-      var list = listPhotos_(ctx.slug, { force: true, limit: cfg.maxPhotosPerEvent + 500 });
-      var photo = null;
-      for (var i = 0; i < list.length; i += 1) {
-        if (list[i].id === photoId) photo = list[i];
-      }
-      if (!photo) fail_("foto tidak ditemukan", 404, "not-found");
-      var age = Date.now() - new Date(photo.createdAt).getTime();
-      if (isFinite(age) && age > cfg.undoWindowMs) {
-        fail_("waktu Undo sudah lewat", 403, "undo-expired");
-      }
+  /** Sinkronkan berkas Drive (unggahan manual) ke tab Photos. */
+  syncPhotos: function (params, body) {
+    requireSession_(params, body);
+    var slug = String(pick_(params, body, "slug") || "").trim();
+    var rows = slug ? [eventRowOrFail_(slug)] : listEventRows_(false);
+    var results = rows.map(function (row) {
+      var result = syncDrivePhotos_(row, { force: String(pick_(params, body, "force") || "") === "1" });
+      result.slug = row.slug;
+      return result;
+    });
+    return { results: results, total: results.length };
+  },
+
+  /* ── Template undangan ───────────────────────────────────────────────── */
+
+  /** Template publik; wajib membawa kunci tamu (link undangan sudah berisi `k`). */
+  template: function (params, body) {
+    var ctx = requireGuest_(params, body);
+    return { template: publicTemplateForEvent_(ctx.row) };
+  },
+
+  saveTemplate: function (params, body) {
+    requireSession_(params, body);
+    var input = body || {};
+    if (input.eventId === undefined) input.eventId = pick_(params, body, "eventId");
+    if (input.slug !== undefined || !input.eventId) {
+      var row = requireEventForAdmin_(params, body);
+      input.eventId = String(row.event_id);
     }
+    return { template: saveTemplateFromInput_(input) };
+  },
 
-    var removed = removePhoto_(ctx.slug, photoId);
-    if (!removed) fail_("foto tidak ditemukan", 404, "not-found");
-    return { ok: true, photo: removed };
+  /* ── Daftar cetak ────────────────────────────────────────────────────── */
+
+  createPrintOrder: function (params, body) {
+    var ctx = requireGuest_(params, body);
+    var result = createPrintOrder_(ctx.row, body || {});
+    return { order: result.order, duplicate: result.duplicate };
+  },
+
+  listPrintOrders: function (params, body) {
+    requireSession_(params, body);
+    var row = requireEventForAdmin_(params, body);
+    var status = String(pick_(params, body, "status") || "").trim().toLowerCase();
+    var result = listOrdersForEvent_(row, status || null);
+    return { order: null, items: result.items, total: result.total, counts: result.counts };
+  },
+
+  updatePrintOrderStatus: function (params, body) {
+    requireSession_(params, body);
+    var row = requireEventForAdmin_(params, body);
+    return { order: updateOrderStatus_(row, body || {}) };
+  },
+
+  /* ── RSVP & buku tamu ────────────────────────────────────────────────── */
+
+  rsvp: function (params, body) {
+    var ctx = requireGuest_(params, body);
+    return { rsvp: createRsvp_(ctx.row, body || {}), summary: rsvpSummary_(ctx.row) };
+  },
+
+  listRsvp: function (params, body) {
+    requireSession_(params, body);
+    var row = requireEventForAdmin_(params, body);
+    var result = listRsvpForEvent_(row);
+    return { items: result.items, total: result.total, summary: result.summary };
+  },
+
+  /** GET = daftar ucapan; POST dengan `pesan` = tambah ucapan. */
+  guestbook: function (params, body) {
+    var ctx = requireGuest_(params, body);
+    var isNew = Boolean(body && (body.pesan !== undefined || body.ucapan !== undefined));
+    if (isNew) return { entry: addGuestbookEntry_(ctx.row, body) };
+    var list = listGuestbookForEvent_(ctx.row);
+    return { items: list, total: list.length };
+  },
+
+  deleteGuestbook: function (params, body) {
+    requireSession_(params, body);
+    var row = requireEventForAdmin_(params, body);
+    var entryId = String(pick_(params, body, "entryId") || pick_(params, body, "id") || "").trim();
+    if (!entryId) fail_("entryId wajib diisi", 400, "bad-request");
+    return { ok: true, removed: deleteGuestbookEntry_(row, entryId) };
   }
 };
+
 

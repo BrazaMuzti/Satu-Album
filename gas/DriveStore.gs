@@ -1,47 +1,29 @@
-/* Backend penyimpanan Google Drive untuk Web App GAS.
+/* Penyimpanan foto di Google Drive + indeks di tab `Photos`.
 
-   Layout di Drive (folder dibuat oleh app ini sendiri):
+   Analogi yang dipakai:  Google Drive = "hard disk", tab Photos = "katalog".
 
-     <DRIVE_ROOT_FOLDER_NAME>/          ← default "Satu-Album"
-       event-<slug>/
-         event.json                     ← metadata acara (nama, preset, revealAt, uploadKey, count)
-         photo-<timestamp>-<n>.jpg      ← foto asli
+     <DRIVE_ROOT_FOLDER_NAME>/           ← default "Satu-Album"
+       event-<slug>/                     ← folder per acara (TIDAK publik)
+         photo-<ts>-<n>.jpg              ← berkas foto (dibagikan per-file)
 
-   `event.json` adalah SUMBER KEBENARAN: karena itu album tetap hidup walau
-   eksekusi GAS selesai atau deployment dibuat ulang.
+   Kolom tab Photos: photo_id, event_id, nama_file, url, thumb, ukuran, mime,
+                     sumber, diunggah_pada
+   `photo_id` = ID berkas Drive (dipakai juga untuk URL thumbnail), sehingga
+   tidak perlu kolom tambahan.
 
-   Perbedaan dari versi Express (server/src/drive-store.js):
-     - Folder acara TIDAK dibagikan publik; hanya file foto yang publik
-       (Anyone with the link). Dengan begitu `event.json` yang memuat
-       `uploadKey` tidak bisa diunduh orang lain.
-     - Cache tidak lagi in-memory Map, tapi CacheService (lihat Lib.gs).
-     - Scope OAuth `drive` (bukan `drive.file`) supaya folder album dari versi
-       Express lama tetap terbaca. */
+   Folder acara TIDAK dibagikan publik: hanya berkas yang dibagikan
+   (Anyone with the link, view) supaya URL thumbnail bisa dirender. */
 
-var DRIVE_META_FILE = "event.json";
 var DRIVE_FOLDER_PREFIX = "event-";
-/* Penjaga agar satu eksekusi tidak menembus batas waktu/kuota Drive. */
-var DRIVE_MAX_EVENT_FOLDERS = 500;
-var DRIVE_MAX_PHOTOS = 5000;
+var DRIVE_SYNC_MAX_FILES = 2000;     /* pengaman batas waktu eksekusi GAS */
+var DRIVE_SYNC_MAX_REQUESTS = 3;     /* antrian ulang bila 6 menit hampir habis */
 
-function folderNameFor_(slug) {
-  return DRIVE_FOLDER_PREFIX + slug;
-}
+/* ── Folder ───────────────────────────────────────────────────────────── */
 
-function slugFromFolderName_(name) {
-  var text = String(name || "");
-  if (text.indexOf(DRIVE_FOLDER_PREFIX) !== 0) return "";
-  return text.slice(DRIVE_FOLDER_PREFIX.length);
-}
-
-function firstChild_(folder, name) {
-  var it = folder.getFilesByName(name);
-  return it.hasNext() ? it.next() : null;
-}
-
-/* ── Root folder ──────────────────────────────────────────────────────── */
-
-/** Root folder album; dibuat otomatis bila belum ada (ID disimpan di Properties). */
+/**
+ * Root folder album; dibuat otomatis bila belum ada (ID disimpan di Properties).
+ * Dipakai saat initSheets/setup, bukan di jalur baca tamu.
+ */
 function driveRoot_() {
   var cfg = config_();
   if (cfg.rootFolderId) {
@@ -58,247 +40,43 @@ function driveRoot_() {
   return folder;
 }
 
-function findEventFolder_(slug) {
-  var root = driveRoot_();
-  var it = root.getFoldersByName(folderNameFor_(slug));
+function folderNameFor_(slug) {
+  return DRIVE_FOLDER_PREFIX + slug;
+}
+
+/** Folder acara berdasarkan ID tersimpan (fallback: cari nama di root). */
+function eventFolder_(row) {
+  if (!row) return null;
+  var folderId = String(row.drive_folder_id || "");
+  if (folderId) {
+    try {
+      return DriveApp.getFolderById(folderId);
+    } catch (err) {
+      Logger.log("[drive] folder " + folderId + " tidak terbaca, mencari berdasarkan nama: " + err);
+    }
+  }
+  var it = driveRoot_().getFoldersByName(folderNameFor_(String(row.slug)));
   return it.hasNext() ? it.next() : null;
 }
 
-function ensureEventFolder_(slug) {
+/** Pastikan folder acara ada; kembalikan Folder. */
+function ensureEventFolder_(slug, nama) {
+  var row = findEventBySlug_(slug);
+  if (row) {
+    var existing = eventFolder_(row);
+    if (existing) return existing;
+  }
+  /* Nama folder: "event-<slug>" agar unik walau nama acara berubah. */
   var root = driveRoot_();
   var it = root.getFoldersByName(folderNameFor_(slug));
   if (it.hasNext()) return it.next();
-  return root.createFolder(folderNameFor_(slug));
+  var folder = root.createFolder(folderNameFor_(slug));
+  if (folder.getName() !== folderNameFor_(slug)) folder.setName(folderNameFor_(slug));
+  Logger.log("[drive] folder dibuat untuk " + slug + " (" + String(nama || "") + ")");
+  return folder;
 }
 
-/* ── Metadata event.json ──────────────────────────────────────────────── */
-
-/** Hanya field yang memang bagian dari metadata acara (kolom runtime dibuang). */
-function toPersisted_(meta, slug) {
-  return {
-    version: 1,
-    id: meta.id,
-    slug: slug || meta.slug,
-    name: meta.name,
-    type: meta.type || "lainnya",
-    preset: meta.preset || "funsaver",
-    revealAt: meta.revealAt || null,
-    createdAt: meta.createdAt,
-    uploadKey: meta.uploadKey,
-    count: Number(meta.count || 0),
-    countUpdatedAt: meta.countUpdatedAt || null,
-    legacy: meta.legacy ? true : undefined
-  };
-}
-
-function normalizeMeta_(raw, folder, metaFileId) {
-  var data = raw || {};
-  var slug = String(data.slug || (folder ? slugFromFolderName_(folder.getName()) : "")).trim();
-  return {
-    version: 1,
-    id: data.id || makeEventId_(),
-    slug: slug,
-    name: data.name || slug,
-    type: data.type || "lainnya",
-    preset: data.preset || "funsaver",
-    revealAt: data.revealAt || null,
-    createdAt: toIso_(data.createdAt || (folder ? folder.getDateCreated() : null)),
-    uploadKey: data.uploadKey || "",
-    count: Number(data.count || 0),
-    countUpdatedAt: data.countUpdatedAt || null,
-    legacy: Boolean(data.legacy),
-    folderId: folder ? folder.getId() : null,
-    metaFileId: metaFileId || null
-  };
-}
-
-/** Baca `event.json` di sebuah folder; folder lama tanpa metadata disintesis. */
-function readMetaFromFolder_(folder) {
-  var slug = slugFromFolderName_(folder.getName());
-  var file = firstChild_(folder, DRIVE_META_FILE);
-  if (!file) {
-    /* Folder dari versi lama (tanpa event.json): metadata disintesis + kunci
-       tamu baru, lalu ditulis agar tidak diulang setiap kali dibaca. */
-    var legacy = normalizeMeta_({ slug: slug, name: slug, legacy: true }, folder, null);
-    legacy.uploadKey = makeUploadKey_();
-    try {
-      return writeEventMeta_(slug, legacy, folder);
-    } catch (err) {
-      Logger.log("[drive] gagal menulis event.json untuk " + slug + ": " + err);
-      return legacy;
-    }
-  }
-  var raw = {};
-  try {
-    raw = JSON.parse(file.getBlob().getDataAsString("UTF-8")) || {};
-  } catch (err) {
-    Logger.log("[drive] event.json rusak di " + slug + ", memakai metadata minimal: " + err);
-    raw = {};
-  }
-  var meta = normalizeMeta_(raw, folder, file.getId());
-  if (!meta.uploadKey) {
-    meta.uploadKey = makeUploadKey_();
-    try {
-      meta = writeEventMeta_(slug, meta, folder);
-    } catch (err) {
-      Logger.log("[drive] gagal menyimpan kunci tamu " + slug + ": " + err);
-    }
-  }
-  return meta;
-}
-
-function writeEventMeta_(slug, meta, folder) {
-  var target = folder || ensureEventFolder_(slug);
-  var record = toPersisted_(Object.assign({}, meta, { slug: slug }), slug);
-  var text = JSON.stringify(record, null, 2);
-  var existing = firstChild_(target, DRIVE_META_FILE);
-  var saved;
-  try {
-    if (existing) {
-      existing.setContent(text);
-      saved = existing;
-    } else {
-      saved = target.createFile(Utilities.newBlob(text, "application/json", DRIVE_META_FILE));
-    }
-  } catch (err) {
-    fail_("gagal menyimpan event.json: " + (err && err.message ? err.message : err), 502, "drive-error");
-  }
-  cacheRemove_("events");
-  cacheRemove_("event:" + slug);
-  return normalizeMeta_(record, target, saved.getId());
-}
-
-/* ── Baca daftar acara ────────────────────────────────────────────────── */
-
-/** Daftar acara = semua folder `event-*` di dalam root + isi event.json-nya. */
-function listEvents_(force) {
-  if (!force) {
-    var cached = cacheGetJson_("events");
-    if (cached) return cached;
-  }
-  var root = driveRoot_();
-  var folders = root.getFolders();
-  var metas = [];
-  var guard = 0;
-  while (folders.hasNext() && guard < DRIVE_MAX_EVENT_FOLDERS) {
-    guard += 1;
-    var folder = folders.next();
-    var name = folder.getName();
-    if (name.indexOf(DRIVE_FOLDER_PREFIX) !== 0) continue;
-    if (!slugFromFolderName_(name)) continue;
-    try {
-      metas.push(readMetaFromFolder_(folder));
-    } catch (err) {
-      Logger.log("[drive] folder " + name + " dilewati: " + err);
-    }
-  }
-  metas.sort(function (a, b) {
-    return String(a.createdAt).localeCompare(String(b.createdAt));
-  });
-  cachePutJson_("events", metas, config_().cacheTtlSec);
-  return metas;
-}
-
-/** Satu acara: pakai cache bila hangat, kalau tidak baca folder itu langsung. */
-function getEventMeta_(slug, force) {
-  if (!force) {
-    var cachedEvents = cacheGetJson_("events");
-    if (cachedEvents) {
-      for (var i = 0; i < cachedEvents.length; i += 1) {
-        if (cachedEvents[i].slug === slug) return cachedEvents[i];
-      }
-    }
-    var cachedOne = cacheGetJson_("event:" + slug);
-    if (cachedOne) return cachedOne;
-  }
-  var folder = findEventFolder_(slug);
-  if (!folder) return null;
-  var meta = readMetaFromFolder_(folder);
-  cachePutJson_("event:" + slug, meta, config_().cacheTtlSec);
-  return meta;
-}
-
-/* ── Tulisan acara ────────────────────────────────────────────────────── */
-
-function createEventMeta_(params) {
-  var name = String(params.name || "").trim();
-  if (!name) fail_("name is required", 400, "bad-request");
-  if (name.length > 120) fail_("nama acara maksimal 120 karakter", 400, "bad-request");
-
-  var taken = {};
-  var events = listEvents_(true);
-  for (var i = 0; i < events.length; i += 1) taken[events[i].slug] = true;
-
-  var slug = uniqueSlug_(slugify_(name), taken);
-  var meta = {
-    id: makeEventId_(),
-    slug: slug,
-    name: name,
-    type: params.type || "lainnya",
-    preset: params.preset || "funsaver",
-    revealAt: params.revealAt || null,
-    createdAt: new Date().toISOString(),
-    uploadKey: makeUploadKey_(),
-    count: 0,
-    countUpdatedAt: null
-  };
-  var saved;
-  try {
-    saved = writeEventMeta_(slug, meta);
-  } catch (err) {
-    if (err instanceof ApiFailure) throw err;
-    fail_("gagal membuat acara: " + (err && err.message ? err.message : err), 502, "create-failed");
-  }
-  cachePutJson_("photos:" + slug, [], config_().cacheTtlSec);
-  return presentEvent_(saved, true);
-}
-
-function updateEventMeta_(slug, patch) {
-  var data = patch || {};
-  var meta = getEventMeta_(slug, true);
-  if (!meta) return null;
-  var updated = Object.assign({}, meta, {
-    name: data.name !== undefined && data.name !== null ? String(data.name).trim() : meta.name,
-    type: data.type !== undefined && data.type !== null ? data.type : meta.type,
-    preset: data.preset !== undefined && data.preset !== null ? data.preset : meta.preset,
-    revealAt: data.revealAt !== undefined ? data.revealAt : meta.revealAt,
-    /* rotateUploadKey: cabut link lama yang sudah tersebar. */
-    uploadKey: data.rotateUploadKey ? makeUploadKey_() : meta.uploadKey,
-    countUpdatedAt: new Date().toISOString()
-  });
-  var saved = writeEventMeta_(slug, updated);
-  return presentEvent_(saved, true);
-}
-
-function trashEvent_(slug) {
-  var folder = findEventFolder_(slug);
-  if (!folder) return false;
-  folder.setTrashed(true);
-  cacheRemove_("events");
-  cacheRemove_("event:" + slug);
-  cacheRemove_("photos:" + slug);
-  return true;
-}
-
-/** Metadata publik acara. `uploadKey` hanya disertakan bila dipinta (admin). */
-function presentEvent_(meta, withKey) {
-  if (!meta) return null;
-  var event = {
-    id: meta.id,
-    slug: meta.slug,
-    name: meta.name,
-    type: meta.type || "lainnya",
-    preset: meta.preset || "funsaver",
-    revealAt: meta.revealAt || null,
-    createdAt: meta.createdAt,
-    count: Number(meta.count || 0),
-    legacy: Boolean(meta.legacy)
-  };
-  if (withKey) event.uploadKey = meta.uploadKey;
-  return event;
-}
-
-/* ── Foto ─────────────────────────────────────────────────────────────── */
+/* ── URL & bentuk data foto ───────────────────────────────────────────── */
 
 /* URL thumbnail Drive: `uc?export=view` sering gagal render, sedangkan
    `thumbnail?id=&sz=w<lebar>` stabil dan tidak butuh API key. */
@@ -310,55 +88,51 @@ function photoFileName_(ext) {
   return "photo-" + Date.now() + "-" + Math.floor(Math.random() * 1000000) + "." + ext;
 }
 
-function toPhoto_(slug, file, mime) {
-  var cfg = config_();
-  var id = file.getId();
-  var size = null;
-  try {
-    size = typeof file.getSize() === "number" ? file.getSize() : null;
-  } catch (err) {
-    size = null;
-  }
+function extFor_(mime) {
+  if (mime === "image/png") return "png";
+  if (mime === "image/webp") return "webp";
+  return "jpg";
+}
+
+/** Baris Photos → objek JSON untuk galeri (bentuk sama dengan API lama). */
+function presentPhoto_(row) {
   return {
-    id: id,
-    eventSlug: slug,
-    name: file.getName(),
-    url: imageUrl_(id, cfg.imageWidth),
-    thumb: imageUrl_(id, cfg.thumbWidth),
-    source: "drive",
-    createdAt: toIso_(file.getDateCreated()),
-    size: size,
-    mime: mime || null
+    id: String(row.photo_id),
+    name: String(row.nama_file || ""),
+    url: String(row.url || ""),
+    thumb: String(row.thumb || row.url || ""),
+    size: row.ukuran === "" || row.ukuran === undefined ? null : Number(row.ukuran),
+    mime: String(row.mime || ""),
+    source: String(row.sumber || "camera"),
+    createdAt: toIso_(row.diunggah_pada)
   };
 }
 
-/** Daftar foto sebuah acara (hanya berkas gambar; event.json dilewati). */
-function listPhotos_(slug, options) {
+/* ── Baca daftar foto ─────────────────────────────────────────────────── */
+
+/**
+ * Daftar foto sebuah acara (dari tab Photos, tanpa menyentuh Drive).
+ * @param {Object} row baris Events
+ * @param {Object} [options] { since, force }
+ */
+function listPhotos_(row, options) {
   var opts = options || {};
-  var cfg = config_();
-  var limit = Math.min(Number(opts.limit) || DRIVE_MAX_PHOTOS, DRIVE_MAX_PHOTOS);
-  var cacheKey = "photos:" + slug;
-  var all = opts.force ? null : cacheGetJson_(cacheKey);
-  if (!all) {
-    var folder = findEventFolder_(slug);
-    if (!folder) return [];
-    var files = folder.getFiles();
-    all = [];
-    var guard = 0;
-    while (files.hasNext() && guard < limit) {
-      guard += 1;
-      var file = files.next();
-      var mime = String(file.getMimeType() || "");
-      if (mime.indexOf("image/") !== 0) continue;
-      all.push(toPhoto_(slug, file, mime));
-    }
-    all.sort(function (a, b) {
-      return String(a.createdAt).localeCompare(String(b.createdAt));
-    });
-    cachePutJson_(cacheKey, all, cfg.cacheTtlSec);
+  var eventId = String(row.event_id);
+  var cacheKey = "photos:" + row.slug;
+  var list = opts.force ? null : cacheGetJson_(cacheKey);
+  if (!list) {
+    list = listPhotoRowsByEvent_(eventId).map(presentPhoto_);
+    cachePutJson_(cacheKey, list, config_().cacheTtlSec);
   }
-  return all.slice(0, limit);
+  if (opts.since) {
+    list = list.filter(function (photo) {
+      return String(photo.createdAt) > String(opts.since);
+    });
+  }
+  return list;
 }
+
+/* ── Unggah ───────────────────────────────────────────────────────────── */
 
 /** Bagikan SATU file foto ke siapa pun yang punya link (bukan foldernya). */
 function shareAnyone_(file, label) {
@@ -373,119 +147,249 @@ function shareAnyone_(file, label) {
   }
 }
 
-function addPhoto_(params) {
+/**
+ * Simpan foto ke Drive lalu catat barisnya di tab Photos.
+ * @param {Object} row    baris Events
+ * @param {Array}  bytes  isi berkas
+ * @param {string} mime   tipe gambar terdeteksi (sniffImageMime_)
+ * @param {string} [source] "camera" (default) | "sync" | "upload"
+ */
+function storePhoto_(row, bytes, mime, source) {
   var cfg = config_();
-  var folder = ensureEventFolder_(params.slug);
-  var ext = params.mime === "image/png" ? "png" : params.mime === "image/webp" ? "webp" : "jpg";
-  var name = photoFileName_(ext);
-  var blob = Utilities.newBlob(params.bytes, params.mime, name);
+  var folder = ensureEventFolder_(String(row.slug), String(row.nama));
+  var name = photoFileName_(extFor_(mime));
   var file;
   try {
-    file = folder.createFile(blob);
+    file = folder.createFile(Utilities.newBlob(bytes, mime, name));
   } catch (err) {
     fail_("gagal mengunggah foto: " + (err && err.message ? err.message : err), 502, "drive-error");
   }
-  shareAnyone_(file, name);
-  var photo = toPhoto_(params.slug, file, params.mime);
-  cacheRemove_("photos:" + params.slug);
-  bumpCount_(params.slug, 1, folder);
-  return { photo: photo, imageWidth: cfg.imageWidth };
-}
-
-/**
- * Naik/turunkan `count` di event.json tanpa membaca ulang seluruh folder.
- * `refresh=1` pada action `photos` memakai reconcileCount_ untuk memperbaiki
- * bila pernah ada ketidakcocokan (mis. dua unggahan bersamaan).
- */
-function bumpCount_(slug, delta, folder) {
-  var target = folder || findEventFolder_(slug);
-  if (!target) return null;
-  var meta = readMetaFromFolder_(target);
-  meta.count = Math.max(0, Number(meta.count || 0) + Number(delta || 0));
-  meta.countUpdatedAt = new Date().toISOString();
+  var shared = shareAnyone_(file, name);
+  var fileId = file.getId();
+  var size = null;
   try {
-    return writeEventMeta_(slug, meta, target);
+    size = typeof file.getSize() === "number" ? file.getSize() : bytes.length;
   } catch (err) {
-    Logger.log("[drive] gagal memperbarui count " + slug + ": " + err);
-    return null;
+    size = bytes.length;
   }
-}
-
-/** Selaraskan `count` di event.json dengan jumlah berkas nyata di folder. */
-function reconcileCount_(slug, actual) {
-  var folder = findEventFolder_(slug);
-  if (!folder) return null;
-  var meta = readMetaFromFolder_(folder);
-  if (Number(meta.count) === Number(actual) && meta.countUpdatedAt) return meta;
-  meta.count = Number(actual);
-  meta.countUpdatedAt = new Date().toISOString();
-  try {
-    return writeEventMeta_(slug, meta, folder);
-  } catch (err) {
-    Logger.log("[drive] gagal menyelaraskan count " + slug + ": " + err);
-    return meta;
-  }
-}
-
-function removePhoto_(slug, photoId) {
-  var file;
-  try {
-    file = DriveApp.getFileById(photoId);
-  } catch (err) {
-    return null; /* sudah tidak ada */
-  }
-  if (file.isTrashed()) return null;
-  var folder = findEventFolder_(slug);
-  if (folder) {
-    var folderId = folder.getId();
-    var parents = file.getParents();
-    var inEvent = false;
-    while (parents.hasNext()) {
-      if (parents.next().getId() === folderId) {
-        inEvent = true;
-        break;
-      }
-    }
-    if (!inEvent) fail_("foto bukan milik acara ini", 403, "not-in-event");
-  }
-  var photo = toPhoto_(slug, file, String(file.getMimeType() || ""));
-  file.setTrashed(true);
-  cacheRemove_("photos:" + slug);
-  bumpCount_(slug, -1, folder);
+  var entry = appendRow_("Photos", {
+    photo_id: fileId,
+    event_id: String(row.event_id),
+    nama_file: name,
+    url: imageUrl_(fileId, cfg.imageWidth),
+    thumb: imageUrl_(fileId, cfg.thumbWidth),
+    ukuran: size,
+    mime: mime,
+    sumber: source || "camera",
+    diunggah_pada: new Date().toISOString()
+  });
+  cacheRemove_("photos:" + row.slug);
+  cacheRemove_("photoCount:" + row.event_id);
+  var photo = presentPhoto_(entry);
+  photo.shared = shared;
   return photo;
 }
 
-/* ── Kesehatan & statistik ────────────────────────────────────────────── */
+/* ── Hapus ────────────────────────────────────────────────────────────── */
 
-function health_(options) {
+/**
+ * Hapus foto: berkas Drive → Trash + baris Photos.
+ * @param {Object} row     baris Events
+ * @param {string} photoId ID berkas Drive
+ * @param {boolean} admin  tamu hanya boleh membatalkan fotonya sendiri
+ */
+function removePhoto_(row, photoId, admin) {
   var cfg = config_();
-  var rootId = cfg.rootFolderId;
-  if (!rootId) {
-    /* Sengaja tidak membuat folder di jalur ini (health boleh dipanggil siapa saja). */
-    var it = DriveApp.getFoldersByName(cfg.rootFolderName);
-    if (it.hasNext()) rootId = it.next().getId();
+  var entry = findPhotoRow_(String(row.event_id), String(photoId));
+  if (!entry) fail_("foto tidak ditemukan", 404, "not-found");
+
+  if (!admin) {
+    /* Tamu hanya boleh Undo dalam jendela waktu singkat. */
+    var age = Date.now() - new Date(entry.diunggah_pada).getTime();
+    if (!isFinite(age) || age > cfg.undoWindowMs) {
+      fail_("waktu Undo sudah lewat", 403, "undo-expired");
+    }
   }
-  var cachedEvents = cacheGetJson_("events");
-  var total = cachedEvents ? cachedEvents.length : null;
-  if (options && options.force) total = listEvents_(true).length;
+
+  /* Pastikan berkas memang di folder acara ini (cegah hapus lintas acara). */
+  var folder = eventFolder_(row);
+  try {
+    var file = DriveApp.getFileById(String(photoId));
+    if (!file.isTrashed()) {
+      if (folder) {
+        var parents = file.getParents();
+        var inEvent = false;
+        while (parents.hasNext()) {
+          if (parents.next().getId() === folder.getId()) {
+            inEvent = true;
+            break;
+          }
+        }
+        if (!inEvent) fail_("foto bukan milik acara ini", 403, "not-in-event");
+      }
+      file.setTrashed(true);
+    }
+  } catch (err) {
+    if (err instanceof ApiFailure) throw err;
+    /* Berkas sudah tidak ada di Drive: baris katalog tetap dibersihkan. */
+    Logger.log("[drive] berkas " + photoId + " tidak terbaca saat hapus: " + err);
+  }
+  deleteRow_("Photos", entry._row);
+  cacheRemove_("photos:" + row.slug);
+  cacheRemove_("photoCount:" + row.event_id);
+  return presentPhoto_(entry);
+}
+
+/* ── Sinkronisasi folder Drive → tab Photos ───────────────────────────── */
+
+/**
+ * Pindai folder Drive acara dan catat berkas gambar yang BELUM ada di tab
+ * Photos (mis. foto yang diunggah manual lewat aplikasi Drive).
+ *
+ * @param {Object} row baris Events
+ * @param {Object} [options] { force: true → periksa ulang berkas yang sudah ada }
+ * @return {Object} { added, skipped, total, hasMore, folderId }
+ */
+function syncDrivePhotos_(row, options) {
+  var opts = options || {};
+  var eventId = String(row.event_id);
+  var known = {};
+  var existing = readRows_("Photos", function (r) {
+    return String(r.event_id) === eventId;
+  });
+  for (var i = 0; i < existing.length; i += 1) known[String(existing[i].photo_id)] = true;
+
+  var folder = eventFolder_(row);
+  if (!folder) {
+    /* Acara lama tanpa folder: buat dan kembalikan hasil kosong. */
+    folder = ensureEventFolder_(String(row.slug), String(row.nama));
+    updateRow_("Events", row._row, { drive_folder_id: folder.getId() });
+    return { added: 0, skipped: 0, total: existing.length, hasMore: false, folderId: folder.getId(), createdFolder: true };
+  }
+
+  var cfg = config_();
+  var files = folder.getFiles();
+  var added = 0;
+  var skipped = 0;
+  var scanned = 0;
+  var hasMore = false;
+  var started = Date.now();
+  var rows = [];
+
+  while (files.hasNext()) {
+    /* Batas waktu eksekusi Apps Script ±6 menit: hentikan jauh sebelumnya. */
+    if (Date.now() - started > 240000) {
+      hasMore = true;
+      break;
+    }
+    var file = files.next();
+    scanned += 1;
+    if (scanned > DRIVE_SYNC_MAX_FILES) {
+      hasMore = true;
+      break;
+    }
+    var fileId = file.getId();
+    if (known[fileId] && !opts.force) {
+      skipped += 1;
+      continue;
+    }
+    var mime = String(file.getMimeType() || "");
+    if (mime.indexOf("image/") !== 0) continue;
+    if (known[fileId]) {
+      skipped += 1;
+      continue;
+    }
+    shareAnyone_(file, file.getName());
+    var size = null;
+    try {
+      size = file.getSize();
+    } catch (err) {
+      size = null;
+    }
+    rows.push({
+      photo_id: fileId,
+      event_id: eventId,
+      nama_file: file.getName(),
+      url: imageUrl_(fileId, cfg.imageWidth),
+      thumb: imageUrl_(fileId, cfg.thumbWidth),
+      ukuran: size === null || size === undefined ? "" : size,
+      mime: mime,
+      sumber: "sync",
+      diunggah_pada: toIso_(file.getDateCreated())
+    });
+    known[fileId] = true;
+    added += 1;
+  }
+
+  /* Tulis sekaligus (bulk) — jauh lebih cepat daripada appendRow per file. */
+  if (rows.length) appendRows_("Photos", rows);
+
+  cacheRemove_("photos:" + row.slug);
+  cacheRemove_("photoCount:" + eventId);
   return {
-    mode: "drive",
-    ready: true,
+    added: added,
+    skipped: skipped,
+    total: existing.length + added,
+    scanned: scanned,
+    hasMore: hasMore,
+    folderId: folder.getId()
+  };
+}
+
+/* ── Statistik & kesehatan ────────────────────────────────────────────── */
+
+/** Jumlah foto per acara (dengan cache singkat karena dipanggil dasbor). */
+function photoCount_(row) {
+  var key = "photoCount:" + row.event_id;
+  var cached = cacheGetJson_(key);
+  if (cached && isFinite(Number(cached.n))) return Number(cached.n);
+  var n = listPhotoRowsByEvent_(String(row.event_id)).length;
+  cachePutJson_(key, { n: n }, config_().cacheTtlSec);
+  return n;
+}
+
+/** Ringkasan kesehatan untuk halaman pengaturan admin. */
+function health_() {
+  var cfg = config_();
+  var out = {
+    mode: "sheets+drive",
     version: cfg.version,
+    sheetConfigured: Boolean(cfg.sheetId),
+    sessionConfigured: Boolean(cfg.sessionSecret),
     rootFolderName: cfg.rootFolderName,
-    rootFolderId: rootId || null,
-    adminConfigured: cfg.adminTokens.length > 0,
-    events: total,
-    cache: { ttlSec: cfg.cacheTtlSec, eventsCached: Boolean(cachedEvents) },
+    rootFolderId: cfg.rootFolderId || null,
+    counts: { events: 0, photos: 0, templates: 0, printOrders: 0, rsvp: 0, guestbook: 0 },
     limits: {
       maxUploadBytes: cfg.maxUploadBytes,
       maxPhotosPerEvent: cfg.maxPhotosPerEvent,
       undoWindowMs: cfg.undoWindowMs,
       uploadsPerHour: cfg.rateUploadPerHour,
       createsPerHour: cfg.rateCreatePerHour
-    }
+    },
+    errors: []
   };
+  function safeCount(name) {
+    try {
+      return readRows_(name).length;
+    } catch (err) {
+      out.errors.push(name + ": " + (err && err.message ? err.message : err));
+      return 0;
+    }
+  }
+  out.counts.events = safeCount("Events");
+  out.counts.photos = safeCount("Photos");
+  out.counts.templates = safeCount("Templates");
+  out.counts.printOrders = safeCount("PrintOrders");
+  out.counts.rsvp = safeCount("RSVP");
+  out.counts.guestbook = safeCount("Guestbook");
+  if (!out.rootFolderId) {
+    try {
+      var it = DriveApp.getFoldersByName(cfg.rootFolderName);
+      out.rootFolderId = it.hasNext() ? it.next().getId() : null;
+    } catch (err) {
+      out.errors.push("drive: " + (err && err.message ? err.message : err));
+    }
+  }
+  out.ready = out.sheetConfigured && out.sessionConfigured && out.errors.length === 0;
+  return out;
 }
-
-
-

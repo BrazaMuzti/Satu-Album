@@ -234,14 +234,107 @@ function createSandbox(state, properties) {
     remove: (key) => cache.delete(key),
   };
 
+  /* ── Tiruan SpreadsheetApp (database) ──────────────────────────────── */
+
+  const sheets = new Map();
+  state.sheets = sheets;
+  state.spreadsheetId = state.properties.SHEET_ID || "sheet_test";
+
+  function makeSheet(name) {
+    const rows = [];
+    const sheet = {
+      getName: () => name,
+      getLastRow: () => rows.length,
+      getLastColumn: () => rows.reduce((max, row) => Math.max(max, row.length), 0),
+      appendRow: (values) => {
+        rows.push([...values]);
+        return sheet;
+      },
+      getRange: (row, col, numRows = 1, numCols = 1) => ({
+        getValues: () => {
+          const out = [];
+          for (let r = 0; r < numRows; r += 1) {
+            const source = rows[row - 1 + r] || [];
+            const line = [];
+            for (let c = 0; c < numCols; c += 1) {
+              const value = source[col - 1 + c];
+              line.push(value === undefined || value === null ? "" : value);
+            }
+            out.push(line);
+          }
+          return out;
+        },
+        setValues: (values) => {
+          for (let r = 0; r < values.length; r += 1) {
+            const target = row - 1 + r;
+            while (rows.length <= target) rows.push([]);
+            for (let c = 0; c < values[r].length; c += 1) {
+              rows[target][col - 1 + c] = values[r][c];
+            }
+          }
+          return this;
+        },
+        setNumberFormat: () => ({ setNumberFormat: () => null }),
+      }),
+      deleteRow: (index) => {
+        rows.splice(index - 1, 1);
+        return sheet;
+      },
+      setFrozenRows: () => sheet,
+      getDataRange: () => sheet.getRange(1, 1, Math.max(rows.length, 1), Math.max(sheet.getLastColumn(), 1)),
+      getSheetValues: (row, col, numRows, numCols) =>
+        sheet.getRange(row, col, numRows, numCols).getValues(),
+      clear: () => {
+        rows.length = 0;
+        return sheet;
+      },
+    };
+    sheets.set(name, sheet);
+    return sheet;
+  }
+
+  const spreadsheet = {
+    getId: () => state.spreadsheetId,
+    getName: () => "Fake Spreadsheet",
+    getSheetByName: (name) => sheets.get(name) || null,
+    insertSheet: (name) => makeSheet(name),
+    getSheets: () => [...sheets.values()],
+  };
+
+  const SpreadsheetApp = {
+    openById: (id) => {
+      if (state.sheetFailure) throw new Error(state.sheetFailure);
+      if (String(id) !== String(state.spreadsheetId)) throw new Error("Spreadsheet tidak ditemukan: " + id);
+      return spreadsheet;
+    },
+    flush: () => undefined,
+  };
+
   const sandbox = {
     console,
     PropertiesService: { getScriptProperties: () => scriptProperties },
     CacheService: { getScriptCache: () => scriptCache },
+    SpreadsheetApp,
+
     Utilities: {
       DigestAlgorithm: { SHA_256: "SHA_256" },
+      Charset: { UTF_8: "UTF-8", US_ASCII: "US-ASCII" },
       getUuid: () => crypto.randomUUID(),
       computeDigest: (_algorithm, value) => [...crypto.createHash("sha256").update(String(value)).digest()],
+      computeHmacSha256Signature: (value, key) =>
+        [...crypto.createHmac("sha256", String(key)).update(String(value)).digest()],
+      formatDate: (date, timeZone, format) => {
+        /* Hanya format yang dipakai backend: "yyyy-MM-dd" pada zona GMT+7. */
+        const d = date instanceof Date ? date : new Date(date);
+        const zone = /^GMT([+-])(\d{1,2})$/.exec(String(timeZone || ""));
+        const offsetMs = zone ? (zone[1] === "-" ? -1 : 1) * Number(zone[2]) * 3600000 : 0;
+        const shifted = new Date(d.getTime() + offsetMs);
+        const iso = shifted.toISOString();
+        if (format === "yyyy-MM-dd") return iso.slice(0, 10);
+        if (format === "yyyy-MM-dd'T'HH:mm:ss") return iso.slice(0, 19);
+        return iso;
+      },
+
       base64Decode: (encoded) => {
         const text = String(encoded).replace(/\s+/g, "");
         if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text)) throw new Error("base64 tidak valid");
@@ -276,7 +369,18 @@ function createSandbox(state, properties) {
 
   const drive = createFakeDrive(state);
   sandbox.DriveApp = drive.DriveApp;
-  state.helpers = drive.helpers;
+  state.helpers = {
+    ...drive.helpers,
+    sheets,
+    /** Buat tab kosong (tanpa header) untuk fixture. */
+    addSheet: (name) => makeSheet(name),
+    /** Isi baris mentah (termasuk header) ke tab; tab dibuat bila perlu. */
+    seedSheet: (name, rows) => {
+      const sheet = sheets.get(name) || makeSheet(name);
+      for (const row of rows) sheet.appendRow(row);
+      return sheet;
+    },
+  };
   return sandbox;
 }
 
