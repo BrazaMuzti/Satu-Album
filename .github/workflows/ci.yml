@@ -29,5 +29,9 @@ jobs:
       # Uji end-to-end router Code.gs memakai tiruan SpreadsheetApp, DriveApp,
       # CacheService, dan PropertiesService (gas/test/harness.mjs) — tidak butuh
       # kredensial Google sama sekali.
+      #
+      # Pakai pola glob "*" dalam tanda kutip, bukan nama direktori: di Node 22
+      # `node --test gas/test` menganggap argumennya berkas (MODULE_NOT_FOUND),
+      # sedangkan dukungan argumen direktori baru ada di Node 24+.
       - name: Jalankan test API
-        run: node --test gas/test
+        run: node --test "gas/test/*.test.mjs"
